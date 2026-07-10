@@ -221,7 +221,7 @@ pub struct TasksFilter {
     pub assignee: Option<String>,
     pub untracked: bool,
     pub tracked: bool,
-    pub limit: u32,
+    pub limit: Option<u32>,
 }
 
 pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Result<()> {
@@ -232,9 +232,23 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
     } else {
         None
     };
-    let value = api.tasks(project, tracked, filter.limit)?;
+    // API に status/assignee のサーバー側フィルタは無く、取得は直近 limit 件
+    // (サーバー上限 500) のみ。フィルタ時は既定で上限まで取得する。
+    let has_filter = filter.status.is_some() || filter.assignee.is_some();
+    let limit = filter
+        .limit
+        .unwrap_or(if has_filter { 500 } else { 200 })
+        .clamp(1, 500);
+    let value = api.tasks(project, tracked, limit)?;
     // --json でも API の生フィールドを保つため Value のままフィルタする
     let mut items: Vec<Value> = from_value(value)?;
+    // 取得件数が limit に達している場合、フィルタ結果は不完全な可能性がある
+    if has_filter && items.len() as u32 >= limit {
+        eprintln!(
+            "warning: only the newest {limit} tasks were fetched; older matching tasks \
+             may be missing (the API has no server-side status/assignee filters)"
+        );
+    }
 
     if let Some(status) = &filter.status {
         if let Ok(status_value) = status.parse::<i64>() {

@@ -64,9 +64,10 @@ enum Cmd {
         /// Only tracked tasks
         #[arg(long, conflicts_with = "untracked")]
         tracked: bool,
-        /// Max tasks fetched from the API before client-side filtering (1-500)
-        #[arg(long, default_value_t = 200)]
-        limit: u32,
+        /// Max tasks fetched from the API before client-side filtering
+        /// (1-500; default 200, or 500 when --status/--assignee is used)
+        #[arg(long)]
+        limit: Option<u32>,
     },
     /// Operate on a single task (reference: KEY-N, or UUID with --project)
     #[command(subcommand)]
@@ -204,7 +205,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let config = config::resolve(cli.org.clone())?;
+    // me / orgs は org 不要 (キーがあれば getter を起動しない)
+    let need_org = !matches!(cli.command, Cmd::Me | Cmd::Orgs);
+    let config = config::resolve(cli.org.clone(), need_org)?;
     let api = api::Api::new(&config)?;
     let json = cli.json;
     match cli.command {
@@ -227,7 +230,7 @@ fn run() -> Result<()> {
                 assignee,
                 untracked,
                 tracked,
-                limit: limit.clamp(1, 500),
+                limit,
             },
             json,
         ),

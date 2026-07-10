@@ -27,13 +27,17 @@ pub struct Config {
 /// 1. env 直接 (TASKSHOOT_API_KEY / TASKSHOOT_CLI_ORGANIZATION) — CI やエージェントが渡すケース
 /// 2. env TASKSHOOT_CLI_ENV_GETTER_COMMAND をシェルなしで実行し env-file 形式の stdout を取り込む
 /// 3. .loadenv.sh (カレント→上位→実行ファイル位置) から getter コマンド行だけ抽出して 2 へ
-pub fn resolve(org_override: Option<String>) -> Result<Config> {
+///
+/// `need_org=false` のコマンド (me / orgs) は、キーが揃っていれば org 目当てで
+/// getter (op read = 認証が走りうる) を起動しない。
+pub fn resolve(org_override: Option<String>, need_org: bool) -> Result<Config> {
     let env_key = non_empty_env("TASKSHOOT_API_KEY");
     let env_org = non_empty_env("TASKSHOOT_CLI_ORGANIZATION");
     let env_origin = non_empty_env("TASKSHOOT_API_ORIGIN");
 
     let mut fetched: HashMap<String, String> = HashMap::new();
-    if env_key.is_none() || (env_org.is_none() && org_override.is_none()) {
+    let org_unresolved = env_org.is_none() && org_override.is_none();
+    if env_key.is_none() || (need_org && org_unresolved) {
         if let Some(cmd) = find_getter_command()? {
             fetched = run_getter_command(&cmd)?;
         }
