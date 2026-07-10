@@ -82,6 +82,15 @@ fn task_workflow_stages(
     Ok(stages::stages_for_workflow(&workflows, task_workflow_id)?.to_vec())
 }
 
+fn format_change_value(value: &Value) -> String {
+    match value {
+        Value::Null => "-".to_string(),
+        Value::String(s) if s.is_empty() => "-".to_string(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 fn author_name(author: &Option<crate::models::TaskAuthor>) -> String {
     author
         .as_ref()
@@ -597,6 +606,17 @@ pub fn events(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
         );
         for line in event.content.lines() {
             println!("  {line}");
+        }
+        // field_change 等は content が空で metadata.changes に diff が入る
+        if let Some(changes) = event.metadata.get("changes").and_then(|c| c.as_array()) {
+            for change in changes {
+                println!(
+                    "  {}: {} → {}",
+                    change["field"].as_str().unwrap_or("?"),
+                    format_change_value(&change["from"]),
+                    format_change_value(&change["to"]),
+                );
+            }
         }
         for attachment in &event.attachments {
             println!("  attachment: {} ({} bytes)", attachment.filename, attachment.file_size);

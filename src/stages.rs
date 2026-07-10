@@ -5,6 +5,8 @@ use crate::models::{Stage, Workflow};
 /// タスクが従う workflow のステージ集合を解決する。
 /// project workflows API の先頭は id=null の「デフォルト (未割り当て)」合成エントリで、
 /// タスクの workflow.id が null の場合はそれに一致する。
+/// タスクの workflow がプロジェクトから割り当て解除されて一覧に無い場合は、
+/// 別フローのステージで誤解決しないようエラーにする (数値 --status は引き続き使える)。
 pub fn stages_for_workflow<'a>(
     workflows: &'a [Workflow],
     task_workflow_id: &Option<String>,
@@ -12,10 +14,13 @@ pub fn stages_for_workflow<'a>(
     if let Some(flow) = workflows.iter().find(|w| w.id == *task_workflow_id) {
         return Ok(&flow.stages);
     }
-    if let Some(flow) = workflows.iter().find(|w| w.id.is_none()) {
-        return Ok(&flow.stages);
+    match task_workflow_id {
+        Some(id) => bail!(
+            "the task's workflow (id {id}) is not assigned to this project; \
+             specify a numeric --status value instead of a label"
+        ),
+        None => bail!("no workflow stages available for this project"),
     }
-    bail!("no workflow stages available for this project");
 }
 
 /// 数値ならそのまま (サーバー側で workflow 妥当性を検証)、
@@ -157,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn stages_for_workflow_matches_id_and_falls_back() {
+    fn stages_for_workflow_matches_id_and_rejects_unknown() {
         let flows = vec![
             workflow(None, false, default_flow_stages()),
             workflow(
@@ -170,9 +175,9 @@ mod tests {
         assert_eq!(by_id.len(), 2);
         let null_flow = stages_for_workflow(&flows, &None).unwrap();
         assert_eq!(null_flow.len(), 7);
-        // 未知の id はデフォルト (id=null) にフォールバック
-        let unknown = stages_for_workflow(&flows, &Some("missing".into())).unwrap();
-        assert_eq!(unknown.len(), 7);
+        // 未知の id は (割り当て解除された workflow の可能性があるため) エラー。
+        // 別フローへのフォールバックで誤った status 値を送らない
+        assert!(stages_for_workflow(&flows, &Some("missing".into())).is_err());
     }
 
 }

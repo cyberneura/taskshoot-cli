@@ -116,6 +116,9 @@ pub struct TaskEvent {
     pub author: Option<TaskAuthor>,
     #[serde(default)]
     pub content: String,
+    /// field_change 等は content が空で、変更内容は metadata.changes に入る
+    #[serde(default)]
+    pub metadata: serde_json::Value,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     pub created_at: String,
