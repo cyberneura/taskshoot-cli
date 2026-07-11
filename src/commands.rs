@@ -228,6 +228,7 @@ pub struct TasksFilter {
     pub assignee: Option<String>,
     pub untracked: bool,
     pub tracked: bool,
+    pub bot_ready: Option<bool>,
     pub limit: Option<u32>,
 }
 
@@ -279,12 +280,20 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         Some(assignee) => Some(resolve_user_id(api, project, assignee)?),
         None => None,
     };
-    let has_filter = status.is_some() || assignee_id.is_some();
+    let has_filter =
+        status.is_some() || assignee_id.is_some() || filter.bot_ready.is_some();
     let limit = filter
         .limit
         .unwrap_or(if has_filter { 500 } else { 200 })
         .clamp(1, 500);
-    let value = api.tasks(project, tracked, limit, status, assignee_id.as_deref())?;
+    let value = api.tasks(
+        project,
+        tracked,
+        limit,
+        status,
+        assignee_id.as_deref(),
+        filter.bot_ready,
+    )?;
     // --json でも API の生フィールドを保つため Value のまま扱う
     let mut items: Vec<Value> = from_value(value)?;
     // limit 件ちょうど返ってきた場合、それより古い一致タスクが切れている可能性がある
@@ -363,8 +372,8 @@ pub fn show(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> Res
         println!("due:      {}", due);
     }
     println!(
-        "tracked:  {} / events: {} / id: {}",
-        task.tracked, task.event_count, task.id
+        "tracked:  {} / bot_ready: {} / events: {} / id: {}",
+        task.tracked, task.bot_ready, task.event_count, task.id
     );
     if !task.description.is_empty() {
         println!("\n{}", task.description);
@@ -476,6 +485,7 @@ pub struct UpdateArgs {
     pub priority: Option<i64>,
     pub due_date: Option<String>,
     pub labels: Option<Vec<String>>,
+    pub bot_ready: Option<bool>,
 }
 
 pub fn update(
@@ -528,6 +538,9 @@ pub fn update(
     if let Some(labels) = &args.labels {
         body.insert("labels".to_string(), json!(labels));
     }
+    if let Some(bot_ready) = args.bot_ready {
+        body.insert("bot_ready".to_string(), json!(bot_ready));
+    }
     if body.is_empty() {
         bail!("nothing to update; pass at least one field option (see --help)");
     }
@@ -543,18 +556,16 @@ pub fn claim(
     task_arg: &str,
     project: Option<&str>,
     status_override: Option<&str>,
+    if_unassigned: bool,
     json: bool,
 ) -> Result<()> {
     let (project, task_ref) = resolve_target(task_arg, project)?;
-    let me: Me = from_value(api.me()?)?;
     let task: Task = from_value(api.task_detail(&project, &task_ref)?)?;
     let stages = task_workflow_stages(api, &project, &task.workflow.id)?;
     let status = stages::claim_stage(&stages, status_override)?;
-    let value = api.patch_task(
-        &project,
-        &task_ref,
-        &json!({ "assignee_id": me.id, "status": status }),
-    )?;
+    // atomic claim エンドポイント経由。if_unassigned なら他ユーザー assign 済みは
+    // サーバーが 409 を返す (自律エージェントのレース回避)。
+    let value = api.claim_task(&project, &task_ref, status, if_unassigned)?;
     if json {
         return print_json(&value);
     }

@@ -116,6 +116,7 @@ impl Api {
         limit: u32,
         status: Option<i64>,
         assignee_id: Option<&str>,
+        bot_ready: Option<bool>,
     ) -> Result<Value> {
         let mut path = self.project_path(project, &format!("tasks/?limit={limit}"))?;
         if let Some(tracked) = tracked {
@@ -126,6 +127,9 @@ impl Api {
         }
         if let Some(assignee_id) = assignee_id {
             path.push_str(&format!("&assignee_id={}", enc(assignee_id)));
+        }
+        if let Some(bot_ready) = bot_ready {
+            path.push_str(&format!("&bot_ready={bot_ready}"));
         }
         self.get(&path)
     }
@@ -147,6 +151,21 @@ impl Api {
 
     pub fn patch_task(&self, project: &str, task_ref: &str, body: &Value) -> Result<Value> {
         self.patch(&self.task_path(project, task_ref, "")?, body)
+    }
+
+    /// タスクを自分に claim する。if_unassigned=true なら他ユーザー assign 済みは
+    /// 409 (send が "API error 409: ..." で bail) になる。
+    pub fn claim_task(
+        &self,
+        project: &str,
+        task_ref: &str,
+        status: i64,
+        if_unassigned: bool,
+    ) -> Result<Value> {
+        self.post(
+            &self.task_path(project, task_ref, "/claim")?,
+            &json!({ "status": status, "if_unassigned": if_unassigned }),
+        )
     }
 
     pub fn events(&self, project: &str, task_ref: &str) -> Result<Value> {

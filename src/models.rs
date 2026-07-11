@@ -68,6 +68,9 @@ pub struct Task {
     #[serde(default)]
     pub due_date: Option<String>,
     pub tracked: bool,
+    /// Bot (AI エージェント) が着手してよいか。
+    #[serde(default)]
+    pub bot_ready: bool,
     #[serde(default)]
     pub latest_event_at: Option<String>,
     #[serde(default)]

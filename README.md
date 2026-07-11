@@ -80,12 +80,15 @@ taskshoot workflows --project DEV              # 進行フローとステージ�
 taskshoot tasks --project DEV                  # タスク一覧
 taskshoot tasks --project DEV --status 起案 --assignee me
 taskshoot tasks --project DEV --untracked      # casual タスクのみ
+taskshoot tasks --project DEV --bot-ready true # Bot が着手可のタスクのみ
 
 taskshoot task show DEV-12
 taskshoot task create --project DEV --title "新機能" --description "..." --assignee me
 taskshoot task create --project DEV --content "メモ的な相談"   # untracked (番号なし)
 taskshoot task update DEV-12 --status 対応中 --progress 50
+taskshoot task update DEV-12 --bot-ready true  # Bot 着手可フラグ (変更はログに残る)
 taskshoot task claim DEV-12                    # assignee=me + 対応中へ (--status で上書き可)
+taskshoot task claim DEV-12 --if-unassigned    # 未 assign の時だけ claim (他が取得済みなら 409)
 taskshoot task complete DEV-12 --comment "対応完了しました"     # 終端ステージへ
 taskshoot task comment DEV-12 "進捗コメント" --file ./screenshot.png
 taskshoot task events DEV-12                   # スレッド表示
@@ -110,12 +113,14 @@ taskshoot task resume DEV-12
 ### AI エージェントの定型フロー例
 
 ```bash
-taskshoot tasks --project DEV --status 起案 --json     # 未着手を探す
-taskshoot task claim DEV-12 --json                     # 拾う
+taskshoot tasks --project DEV --bot-ready true --status 起案 --json  # 着手可の未着手を探す
+taskshoot task claim DEV-12 --if-unassigned --json     # 拾う (二重処理防止: 他が取得済みなら 409)
 taskshoot task comment DEV-12 "着手します" --json
 # ... 開発 ...
 taskshoot task complete DEV-12 --comment "実装完了。PR: <URL>" --json
 ```
+
+複数エージェントで自律的に回す運用は `taskshoot-agent-loop` スキル参照。
 
 ## 開発
 

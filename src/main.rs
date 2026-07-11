@@ -65,8 +65,11 @@ enum Cmd {
         /// Only tracked tasks
         #[arg(long, conflicts_with = "untracked")]
         tracked: bool,
+        /// Filter by Bot Ready flag (true/false); bot loops use --bot-ready true
+        #[arg(long)]
+        bot_ready: Option<bool>,
         /// Max tasks returned (1-500; default 200, or 500 when
-        /// --status/--assignee is used)
+        /// --status/--assignee/--bot-ready is used)
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -143,6 +146,9 @@ enum TaskCmd {
         /// Repeatable; replaces the whole label list
         #[arg(long = "label")]
         labels: Option<Vec<String>>,
+        /// Bot が着手してよいか (true/false)
+        #[arg(long)]
+        bot_ready: Option<bool>,
     },
     /// Claim a task: assign to me and move to the in-progress stage (対応中)
     Claim {
@@ -152,6 +158,10 @@ enum TaskCmd {
         /// Override the target stage (label or numeric value)
         #[arg(long)]
         status: Option<String>,
+        /// Fail (exit 1, HTTP 409) if the task is already assigned to someone
+        /// else. Autonomous bot loops set this to avoid double-processing.
+        #[arg(long)]
+        if_unassigned: bool,
     },
     /// Complete a task: move to the terminal stage (may enter acceptance phase)
     Complete {
@@ -231,6 +241,7 @@ fn run() -> Result<()> {
             assignee,
             untracked,
             tracked,
+            bot_ready,
             limit,
         } => commands::tasks(
             &api,
@@ -240,6 +251,7 @@ fn run() -> Result<()> {
                 assignee,
                 untracked,
                 tracked,
+                bot_ready,
                 limit,
             },
             json,
@@ -287,6 +299,7 @@ fn run() -> Result<()> {
                 priority,
                 due_date,
                 labels,
+                bot_ready,
             } => commands::update(
                 &api,
                 &task,
@@ -301,6 +314,7 @@ fn run() -> Result<()> {
                     priority,
                     due_date,
                     labels,
+                    bot_ready,
                 },
                 json,
             ),
@@ -308,7 +322,15 @@ fn run() -> Result<()> {
                 task,
                 project,
                 status,
-            } => commands::claim(&api, &task, project.as_deref(), status.as_deref(), json),
+                if_unassigned,
+            } => commands::claim(
+                &api,
+                &task,
+                project.as_deref(),
+                status.as_deref(),
+                if_unassigned,
+                json,
+            ),
             TaskCmd::Complete {
                 task,
                 project,
