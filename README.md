@@ -44,11 +44,18 @@ TASKSHOOT_CLI_ORGANIZATION=cyberneura
 TASKSHOOT_API_KEY=tssk-...
 ```
 
-`client-cli/.loadenv.sh` (gitignore 済み) を作り、信頼登録する:
+`.loadenv.sh` (グローバル gitignore 済み) を**探索されるディレクトリ**に作り、信頼登録する。
+探索は「カレントの祖先」と「実行ファイルの祖先」のみで、**子ディレクトリは見ない**点に注意:
+
+- **リポジトリ内で使う場合**: リポジトリルートに置く (リポジトリ内のどこから実行しても
+  祖先として発見される)。`client-cli/` に置いた場合は `client-cli/` 配下で実行した時だけ見つかる。
+- **`cargo install` したバイナリをどこからでも使う場合**: `~/.loadenv.sh` に置く
+  (`$HOME` は `~/.cargo/bin` の祖先なので実行ファイル側の探索で見つかる)。
+  またはシェルプロファイルで `TASKSHOOT_CLI_ENV_GETTER_COMMAND` を export する (探索不要)。
 
 ```sh
-echo 'export TASKSHOOT_CLI_ENV_GETTER_COMMAND='"'"'op read "op://development/taskshoot/taskshoot-cli"'"'"' > client-cli/.loadenv.sh
-taskshoot trust client-cli/.loadenv.sh   # 1回だけ。ファイルを書き換えたら再実行
+echo 'export TASKSHOOT_CLI_ENV_GETTER_COMMAND='"'"'op read "op://development/taskshoot/taskshoot-cli"'"'"' > .loadenv.sh   # リポジトリルート
+taskshoot trust .loadenv.sh   # 1回だけ。ファイルを書き換えたら再実行
 ```
 
 ### API 接続先
