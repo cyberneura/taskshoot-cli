@@ -109,10 +109,23 @@ impl Api {
         self.get(&self.org_path("projects/")?)
     }
 
-    pub fn tasks(&self, project: &str, tracked: Option<bool>, limit: u32) -> Result<Value> {
+    pub fn tasks(
+        &self,
+        project: &str,
+        tracked: Option<bool>,
+        limit: u32,
+        status: Option<i64>,
+        assignee_id: Option<&str>,
+    ) -> Result<Value> {
         let mut path = self.project_path(project, &format!("tasks/?limit={limit}"))?;
         if let Some(tracked) = tracked {
             path.push_str(&format!("&tracked={tracked}"));
+        }
+        if let Some(status) = status {
+            path.push_str(&format!("&status={status}"));
+        }
+        if let Some(assignee_id) = assignee_id {
+            path.push_str(&format!("&assignee_id={}", enc(assignee_id)));
         }
         self.get(&path)
     }

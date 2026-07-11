@@ -52,10 +52,11 @@ enum Cmd {
     Tasks {
         #[arg(long)]
         project: String,
-        /// Filter by status label (e.g. 起案) or numeric value
+        /// Filter by status label (e.g. 起案) or numeric value (server-side)
         #[arg(long)]
         status: Option<String>,
         /// Filter by assignee: "me", handle name, display name, or user id
+        /// (server-side)
         #[arg(long)]
         assignee: Option<String>,
         /// Only untracked (casual) tasks
@@ -64,8 +65,8 @@ enum Cmd {
         /// Only tracked tasks
         #[arg(long, conflicts_with = "untracked")]
         tracked: bool,
-        /// Max tasks fetched from the API before client-side filtering
-        /// (1-500; default 200, or 500 when --status/--assignee is used)
+        /// Max tasks returned (1-500; default 200, or 500 when
+        /// --status/--assignee is used)
         #[arg(long)]
         limit: Option<u32>,
     },

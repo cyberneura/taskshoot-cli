@@ -231,6 +231,37 @@ pub struct TasksFilter {
     pub limit: Option<u32>,
 }
 
+/// 一覧フィルタ用の status 解決。ラベルはプロジェクトの全 workflow から引き、
+/// 複数フローで同一ラベルが異なる値になる場合はエラー (数値指定を促す)。
+fn resolve_list_status(api: &Api, project: &str, input: &str) -> Result<i64> {
+    let input = input.trim();
+    if let Ok(value) = input.parse::<i64>() {
+        return Ok(value);
+    }
+    let workflows: Vec<Workflow> = from_value(api.project_workflows(project)?)?;
+    let mut matches: Vec<(i64, String)> = Vec::new();
+    for flow in &workflows {
+        if let Some(stage) = flow.stages.iter().find(|s| s.active && s.label == input) {
+            if !matches.iter().any(|(value, _)| *value == stage.value) {
+                matches.push((stage.value, flow.name.clone()));
+            }
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches[0].0),
+        0 => bail!("unknown status '{input}' in this project's workflows"),
+        _ => bail!(
+            "status label '{input}' maps to different values across workflows ({}); \
+             specify a numeric value",
+            matches
+                .iter()
+                .map(|(value, flow)| format!("{value} in {flow}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Result<()> {
     let tracked = if filter.untracked {
         Some(false)
@@ -239,48 +270,39 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
     } else {
         None
     };
-    // API に status/assignee のサーバー側フィルタは無く、取得は直近 limit 件
-    // (サーバー上限 500) のみ。フィルタ時は既定で上限まで取得する。
-    let has_filter = filter.status.is_some() || filter.assignee.is_some();
+    // status / assignee はサーバー側フィルタに解決して渡す
+    let status = match &filter.status {
+        Some(status) => Some(resolve_list_status(api, project, status)?),
+        None => None,
+    };
+    let assignee_id = match &filter.assignee {
+        Some(assignee) => Some(resolve_user_id(api, project, assignee)?),
+        None => None,
+    };
+    let has_filter = status.is_some() || assignee_id.is_some();
     let limit = filter
         .limit
         .unwrap_or(if has_filter { 500 } else { 200 })
         .clamp(1, 500);
-    let value = api.tasks(project, tracked, limit)?;
-    // --json でも API の生フィールドを保つため Value のままフィルタする
+    let value = api.tasks(project, tracked, limit, status, assignee_id.as_deref())?;
+    // --json でも API の生フィールドを保つため Value のまま扱う
     let mut items: Vec<Value> = from_value(value)?;
-    // 取得件数が limit に達している場合、フィルタ結果は不完全な可能性がある
-    if has_filter && items.len() as u32 >= limit {
+    // limit 件ちょうど返ってきた場合、それより古い一致タスクが切れている可能性がある
+    if items.len() as u32 >= limit {
         eprintln!(
-            "warning: only the newest {limit} tasks were fetched; older matching tasks \
-             may be missing (the API has no server-side status/assignee filters)"
+            "warning: result may be truncated to the newest {limit} tasks; \
+             raise --limit (max 500) if you need more"
         );
     }
-
-    if let Some(status) = &filter.status {
-        if let Ok(status_value) = status.parse::<i64>() {
-            items.retain(|t| t["status"].as_i64() == Some(status_value));
-        } else {
-            items.retain(|t| t["status_label"].as_str() == Some(status.as_str()));
-        }
-    }
-    if let Some(assignee) = &filter.assignee {
-        if assignee == "me" {
-            let me: Me = from_value(api.me()?)?;
-            items.retain(|t| t["assignee"]["id"].as_str() == Some(me.id.as_str()));
-        } else {
-            let needle = assignee.to_lowercase();
-            items.retain(|t| {
-                let a = &t["assignee"];
-                a["id"].as_str() == Some(assignee.as_str())
-                    || a["display_name"]
-                        .as_str()
-                        .is_some_and(|n| n.to_lowercase() == needle)
-                    || a["handle_name"]
-                        .as_str()
-                        .is_some_and(|h| h.to_lowercase() == needle)
-            });
-        }
+    // ラベル指定時はラベル完全一致で再フィルタする。サーバーは数値でしか絞れず、
+    // 別 workflow が同じ数値に別ラベルを使っているとその分が混入するため
+    if let Some(label) = filter
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| s.parse::<i64>().is_err())
+    {
+        items.retain(|t| t["status_label"].as_str() == Some(label));
     }
 
     if json {

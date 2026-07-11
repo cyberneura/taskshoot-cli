@@ -97,7 +97,9 @@ taskshoot task resume DEV-12
 - タスク参照は `KEY-番号` (例 `DEV-12`)。untracked タスクは番号を持たないため
   UUID + `--project` で指定する。
 - `--status` はラベル (例 `対応中`) か数値 (例 `40`) のどちらでも指定できる。
-  ラベルはタスクの workflow のステージから解決する。
+  `task update` 等の単一タスク操作ではそのタスクの workflow のステージから解決する。
+  `tasks --status` (一覧フィルタ) はプロジェクトの全 workflow から解決し、同一ラベルが
+  複数の値に解決される場合はエラーになる (数値指定で回避)。
 - `task complete` は workflow の terminal ステージへ変更する。プロジェクトの
   workflow に検収フローがある場合、タスクは完了ではなく検収フェーズに入る (仕様)。
   `--comment` は完了成功後にスレッドへ投稿される。
