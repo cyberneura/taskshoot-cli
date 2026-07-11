@@ -280,8 +280,7 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         Some(assignee) => Some(resolve_user_id(api, project, assignee)?),
         None => None,
     };
-    let has_filter =
-        status.is_some() || assignee_id.is_some() || filter.bot_ready.is_some();
+    let has_filter = status.is_some() || assignee_id.is_some() || filter.bot_ready.is_some();
     let limit = filter
         .limit
         .unwrap_or(if has_filter { 500 } else { 200 })
