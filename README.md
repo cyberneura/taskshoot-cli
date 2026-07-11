@@ -27,9 +27,13 @@ API キー (`tssk-...`) は taskshoot の `/settings/api-keys` (user キー)、�
 2. **getter command** — `TASKSHOOT_CLI_ENV_GETTER_COMMAND` に設定されたコマンドを
    (シェルを介さず) 実行し、stdout を env-file 形式 (`KEY=VALUE`、`#` コメント可)
    としてパースする。
-3. **`.loadenv.sh` 探索** — カレントディレクトリから上位へ (最後に実行ファイルの
-   ディレクトリ) `.loadenv.sh` を探し、`export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...`
+3. **`.loadenv.sh` 探索** — カレントディレクトリから上位へ、次に実行ファイルの
+   ディレクトリから上位へ `.loadenv.sh` を探し、`export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...`
    の行だけを抽出して 2 と同様に実行する (ファイル全体をシェル実行はしない)。
+   **発見したファイルは direnv の allow と同様に、`taskshoot trust <path>` で明示的に
+   信頼したものだけ実行される** (信頼情報は `~/.config/taskshoot/trusted-loadenv` に
+   内容のハッシュ付きで記録され、ファイルが変更されると再信頼が必要)。悪意ある
+   リポジトリ配下で CLI を実行しても任意コマンドが走らないようにするための仕組み。
 
 ### 1Password でのセットアップ例
 
@@ -40,10 +44,11 @@ TASKSHOOT_CLI_ORGANIZATION=cyberneura
 TASKSHOOT_API_KEY=tssk-...
 ```
 
-`client-cli/.loadenv.sh` (gitignore 済み) を作る:
+`client-cli/.loadenv.sh` (gitignore 済み) を作り、信頼登録する:
 
 ```sh
-export TASKSHOOT_CLI_ENV_GETTER_COMMAND='op read "op://development/taskshoot/taskshoot-cli"'
+echo 'export TASKSHOOT_CLI_ENV_GETTER_COMMAND='"'"'op read "op://development/taskshoot/taskshoot-cli"'"'"' > client-cli/.loadenv.sh
+taskshoot trust client-cli/.loadenv.sh   # 1回だけ。ファイルを書き換えたら再実行
 ```
 
 ### API 接続先

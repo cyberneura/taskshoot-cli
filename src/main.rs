@@ -72,6 +72,11 @@ enum Cmd {
     /// Operate on a single task (reference: KEY-N, or UUID with --project)
     #[command(subcommand)]
     Task(TaskCmd),
+    /// Allow executing the getter command of a discovered .loadenv.sh
+    /// (direnv-style allow; defaults to the nearest candidate)
+    Trust {
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -205,12 +210,18 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    // trust は API 設定不要 (config 解決前に処理する)
+    if let Cmd::Trust { path } = &cli.command {
+        return config::trust_loadenv(path.clone());
+    }
     // me / orgs は org 不要 (キーがあれば getter を起動しない)
     let need_org = !matches!(cli.command, Cmd::Me | Cmd::Orgs);
     let config = config::resolve(cli.org.clone(), need_org)?;
     let api = api::Api::new(&config)?;
     let json = cli.json;
     match cli.command {
+        // Trust は config 解決前に処理済み
+        Cmd::Trust { .. } => unreachable!("handled before config resolution"),
         Cmd::Me => commands::me(&api, json),
         Cmd::Orgs => commands::orgs(&api, json),
         Cmd::Projects => commands::projects(&api, json),
