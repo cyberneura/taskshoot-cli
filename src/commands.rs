@@ -23,16 +23,14 @@ fn resolve_target(task_arg: &str, project: Option<&str>) -> Result<(String, Stri
         TaskRef::Slug { project_key, .. } => {
             if let Some(project) = project {
                 if project != project_key {
-                    bail!(
-                        "--project {project} conflicts with the project key in '{task_arg}'"
-                    );
+                    bail!("--project {project} conflicts with the project key in '{task_arg}'");
                 }
             }
             Ok((project_key.clone(), task_ref.api_ref()))
         }
         TaskRef::Uuid(_) => {
-            let project = project
-                .context("--project is required when referencing a task by UUID")?;
+            let project =
+                project.context("--project is required when referencing a task by UUID")?;
             Ok((project.to_string(), task_ref.api_ref()))
         }
     }
@@ -324,7 +322,10 @@ pub fn show(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> Res
     }
     let task: Task = from_value(value.clone())?;
     println!("{}  {}", task.display_ref(), task.title);
-    println!("project:  {} / workflow: {}", task.project_key, task.workflow.name);
+    println!(
+        "project:  {} / workflow: {}",
+        task.project_key, task.workflow.name
+    );
     println!(
         "phase:    {} / status: {} ({}) / progress: {}%",
         task.phase, task.status_label, task.status, task.progress
@@ -619,7 +620,10 @@ pub fn events(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
             }
         }
         for attachment in &event.attachments {
-            println!("  attachment: {} ({} bytes)", attachment.filename, attachment.file_size);
+            println!(
+                "  attachment: {} ({} bytes)",
+                attachment.filename, attachment.file_size
+            );
         }
         println!();
     }

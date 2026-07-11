@@ -74,9 +74,7 @@ enum Cmd {
     Task(TaskCmd),
     /// Allow executing the getter command of a discovered .loadenv.sh
     /// (direnv-style allow; defaults to the nearest candidate)
-    Trust {
-        path: Option<PathBuf>,
-    },
+    Trust { path: Option<PathBuf> },
 }
 
 #[derive(Subcommand)]

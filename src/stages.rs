@@ -179,5 +179,4 @@ mod tests {
         // 別フローへのフォールバックで誤った status 値を送らない
         assert!(stages_for_workflow(&flows, &Some("missing".into())).is_err());
     }
-
 }

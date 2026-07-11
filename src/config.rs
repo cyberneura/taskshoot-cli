@@ -129,10 +129,7 @@ fn find_getter_command() -> Result<Option<String>> {
         );
         return Ok(None);
     }
-    eprintln!(
-        "taskshoot: using {GETTER_ENV} from {}",
-        candidate.display()
-    );
+    eprintln!("taskshoot: using {GETTER_ENV} from {}", candidate.display());
     Ok(Some(cmd))
 }
 
@@ -158,9 +155,7 @@ fn is_trusted_entry(trust_content: &str, path: &Path, sha: &str) -> bool {
     trust_content.lines().any(|line| {
         line.trim()
             .split_once(' ')
-            .is_some_and(|(hash, entry_path)| {
-                hash == sha && Path::new(entry_path.trim()) == path
-            })
+            .is_some_and(|(hash, entry_path)| hash == sha && Path::new(entry_path.trim()) == path)
     })
 }
 
@@ -188,9 +183,8 @@ pub fn trust_loadenv(path: Option<PathBuf>) -> Result<()> {
         .with_context(|| format!("cannot resolve {}", path.display()))?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read {}", path.display()))?;
-    let cmd = extract_getter_line(&content).with_context(|| {
-        format!("{} does not export {GETTER_ENV}", path.display())
-    })?;
+    let cmd = extract_getter_line(&content)
+        .with_context(|| format!("{} does not export {GETTER_ENV}", path.display()))?;
     let sha = sha256_hex(&content);
     let trust_path = trust_file_path().context("HOME is not set")?;
     if let Some(parent) = trust_path.parent() {
@@ -249,8 +243,7 @@ pub fn extract_getter_line(content: &str) -> Option<String> {
 fn strip_quotes(s: &str) -> &str {
     let b = s.as_bytes();
     if b.len() >= 2
-        && ((b[0] == b'\'' && b[b.len() - 1] == b'\'')
-            || (b[0] == b'"' && b[b.len() - 1] == b'"'))
+        && ((b[0] == b'\'' && b[b.len() - 1] == b'\'') || (b[0] == b'"' && b[b.len() - 1] == b'"'))
     {
         &s[1..s.len() - 1]
     } else {
@@ -330,11 +323,7 @@ pub fn parse_env_file(content: &str) -> HashMap<String, String> {
         let line = line.strip_prefix("export ").unwrap_or(line);
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
-            if key.is_empty()
-                || !key
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
+            if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 continue;
             }
             map.insert(key.to_string(), strip_quotes(value.trim()).to_string());
