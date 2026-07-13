@@ -483,6 +483,8 @@ pub struct UpdateArgs {
     pub description: Option<String>,
     pub priority: Option<i64>,
     pub due_date: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
     pub labels: Option<Vec<String>>,
     pub bot_ready: Option<bool>,
 }
@@ -533,6 +535,13 @@ pub fn update(
     }
     if let Some(due_date) = &args.due_date {
         body.insert("due_date".to_string(), json!(due_date));
+    }
+    // ISO8601 datetime。空文字はサーバー側 _parse_datetime が None (クリア) に解釈する。
+    if let Some(started_at) = &args.started_at {
+        body.insert("started_at".to_string(), json!(started_at));
+    }
+    if let Some(completed_at) = &args.completed_at {
+        body.insert("completed_at".to_string(), json!(completed_at));
     }
     if let Some(labels) = &args.labels {
         body.insert("labels".to_string(), json!(labels));

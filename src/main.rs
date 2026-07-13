@@ -74,8 +74,11 @@ enum Cmd {
         limit: Option<u32>,
     },
     /// Operate on a single task (reference: KEY-N, or UUID with --project)
+    // TaskCmd は Update/Create 等がフィールド多数で飛び抜けて大きい variant なので、
+    // clippy::large_enum_variant を避けるため Box 化して Cmd のサイズ差を抑える
+    // (clap は Box<T: Subcommand> の blanket impl を持つのでそのまま動く)。
     #[command(subcommand)]
-    Task(TaskCmd),
+    Task(Box<TaskCmd>),
     /// Allow executing the getter command of a discovered .loadenv.sh
     /// (direnv-style allow; defaults to the nearest candidate)
     Trust { path: Option<PathBuf> },
@@ -143,6 +146,14 @@ enum TaskCmd {
         /// YYYY-MM-DD
         #[arg(long)]
         due_date: Option<String>,
+        /// Start datetime. ISO8601 (e.g. 2026-07-13T10:20:22+09:00 /
+        /// `date -Iseconds`). Empty string clears it.
+        #[arg(long)]
+        started_at: Option<String>,
+        /// Completion datetime. ISO8601 (e.g. 2026-07-13T10:20:22+09:00 /
+        /// `date -Iseconds`). Empty string clears it.
+        #[arg(long)]
+        completed_at: Option<String>,
         /// Repeatable; replaces the whole label list
         #[arg(long = "label")]
         labels: Option<Vec<String>>,
@@ -256,7 +267,7 @@ fn run() -> Result<()> {
             },
             json,
         ),
-        Cmd::Task(task_cmd) => match task_cmd {
+        Cmd::Task(task_cmd) => match *task_cmd {
             TaskCmd::Show { task, project } => {
                 commands::show(&api, &task, project.as_deref(), json)
             }
@@ -298,6 +309,8 @@ fn run() -> Result<()> {
                 description,
                 priority,
                 due_date,
+                started_at,
+                completed_at,
                 labels,
                 bot_ready,
             } => commands::update(
@@ -313,6 +326,8 @@ fn run() -> Result<()> {
                     description,
                     priority,
                     due_date,
+                    started_at,
+                    completed_at,
                     labels,
                     bot_ready,
                 },
