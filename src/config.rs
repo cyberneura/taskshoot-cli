@@ -169,15 +169,68 @@ fn is_trusted(path: &Path, content: &str) -> bool {
     is_trusted_entry(&trust_content, path, &sha256_hex(content))
 }
 
+/// trust が不要な構成か調べる。trust は「.loadenv.sh 探索経路」(解決順 3) 専用の
+/// 仕組みなので、解決順 1/2 が env で満たされているなら探索自体が走らない
+/// (find_getter_command は GETTER_ENV があれば即 return する)。
+fn external_auth_env() -> Option<&'static str> {
+    external_auth_env_with(non_empty_env)
+}
+
+/// env 参照を注入できる形にして、グローバル env を書き換えずにテストする
+/// (テストは並列実行されるため set_var はレースになる)。
+fn external_auth_env_with(lookup: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    // 優先順位は resolve() と揃える (直接キー > getter)。どちらでも trust は不要。
+    ["TASKSHOOT_API_KEY", GETTER_ENV]
+        .into_iter()
+        .find(|name| lookup(name).is_some())
+}
+
+/// bare `taskshoot trust` で候補が 1 つも見つからなかった場合の案内。
+/// env で認証が構成済みなら「trust は不要」であって異常ではないため、
+/// エラーにせず理由を説明して正常終了する。
+fn report_no_loadenv_candidate() -> Result<()> {
+    // env の「値」は決して出さない (変数名のみ)。認証情報の漏洩を避ける。
+    if let Some(source) = external_auth_env() {
+        println!(
+            "nothing to trust: no .loadenv.sh was found, and none is needed \
+             because {source} is already set in the environment."
+        );
+        println!(
+            "`taskshoot trust` only authorizes a discovered .loadenv.sh, which \
+             is the lowest-precedence way to supply credentials. Your setup \
+             uses a higher-precedence one, so the .loadenv.sh search never runs."
+        );
+        return Ok(());
+    }
+
+    let searched = candidate_dirs()
+        .iter()
+        .map(|dir| format!("  {}", dir.join(".loadenv.sh").display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!(
+        "no .loadenv.sh exporting {GETTER_ENV} was found.\n\n\
+         `taskshoot trust` authorizes an existing .loadenv.sh to run its getter \
+         command (direnv-style allow); it does not create one. You only need it \
+         when credentials come from a discovered .loadenv.sh -- setting \
+         {GETTER_ENV} or TASKSHOOT_API_KEY in the environment instead makes \
+         trust unnecessary.\n\n\
+         Searched (ancestors of the current directory, then of the executable):\n\
+         {searched}\n\n\
+         Pass an explicit path to trust a file outside these locations: \
+         `taskshoot trust <path>`"
+    )
+}
+
 /// `taskshoot trust [path]`: .loadenv.sh の getter 実行を許可する (direnv allow 相当)。
 /// path 省略時はカレントから探索した最初の候補を対象にする。
 pub fn trust_loadenv(path: Option<PathBuf>) -> Result<()> {
     let path = match path {
         Some(path) => path,
-        None => discover_loadenv_candidate()?.context(
-            "no .loadenv.sh exporting TASKSHOOT_CLI_ENV_GETTER_COMMAND found \
-             from the current directory",
-        )?,
+        None => match discover_loadenv_candidate()? {
+            Some(candidate) => candidate,
+            None => return report_no_loadenv_candidate(),
+        },
     };
     let path = std::fs::canonicalize(&path)
         .with_context(|| format!("cannot resolve {}", path.display()))?;
@@ -380,6 +433,29 @@ mod tests {
         // export なし・ダブルクォートも許容
         let sh2 = "TASKSHOOT_CLI_ENV_GETTER_COMMAND=\"echo X=1\"\n";
         assert_eq!(extract_getter_line(sh2).as_deref(), Some("echo X=1"));
+    }
+
+    #[test]
+    fn external_auth_env_detects_trust_free_setups() {
+        // env に何も無い = .loadenv.sh 経路が必要 → trust は意味を持つ
+        assert_eq!(external_auth_env_with(|_| None), None);
+        // getter を外部 (ラッパー / シェルプロファイル) が export 済み → trust 不要
+        assert_eq!(
+            external_auth_env_with(|name| (name == GETTER_ENV).then(|| "cat env".to_string())),
+            Some(GETTER_ENV)
+        );
+        // キー直接指定でも trust 不要
+        assert_eq!(
+            external_auth_env_with(
+                |name| (name == "TASKSHOOT_API_KEY").then(|| "tssk-dummy".to_string())
+            ),
+            Some("TASKSHOOT_API_KEY")
+        );
+        // 直接キーと getter の両方があれば resolve() と同じ優先順位で前者を報告する
+        assert_eq!(
+            external_auth_env_with(|_| Some("set".to_string())),
+            Some("TASKSHOOT_API_KEY")
+        );
     }
 
     #[test]

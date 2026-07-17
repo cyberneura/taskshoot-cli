@@ -86,6 +86,10 @@ enum Cmd {
     Task(Box<TaskCmd>),
     /// Allow executing the getter command of a discovered .loadenv.sh
     /// (direnv-style allow; defaults to the nearest candidate)
+    ///
+    /// Only relevant when credentials come from a .loadenv.sh (precedence 3).
+    /// If TASKSHOOT_API_KEY or TASKSHOOT_CLI_ENV_GETTER_COMMAND is set in the
+    /// environment, the .loadenv.sh search never runs and trust is unnecessary.
     Trust { path: Option<PathBuf> },
 }
 

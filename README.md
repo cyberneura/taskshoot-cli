@@ -35,6 +35,13 @@ API キー (`tssk-...`) は taskshoot の `/settings/api-keys` (user キー)、�
    内容のハッシュ付きで記録され、ファイルが変更されると再信頼が必要)。悪意ある
    リポジトリ配下で CLI を実行しても任意コマンドが走らないようにするための仕組み。
 
+> **`taskshoot trust` が必要なのは経路 3 だけ**。経路 1 / 2 (env で
+> `TASKSHOOT_API_KEY` か `TASKSHOOT_CLI_ENV_GETTER_COMMAND` を export する構成。
+> シェルプロファイルやラッパースクリプト経由を含む) では `.loadenv.sh` の探索自体が
+> 走らないため、`.loadenv.sh` も trust も不要 (`~/.config/taskshoot/trusted-loadenv`
+> が存在しなくてよい)。この構成で `taskshoot trust` を引数無しで実行すると
+> 「trust は不要」と表示して正常終了する。
+
 ### 1Password でのセットアップ例
 
 1Password の development vault に item を作り、env-file 形式のフィールドを入れる:
