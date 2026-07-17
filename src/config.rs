@@ -169,9 +169,9 @@ fn is_trusted(path: &Path, content: &str) -> bool {
     is_trusted_entry(&trust_content, path, &sha256_hex(content))
 }
 
-/// trust が不要な構成か調べる。trust は「.loadenv.sh 探索経路」(解決順 3) 専用の
-/// 仕組みなので、解決順 1/2 が env で満たされているなら探索自体が走らない
-/// (find_getter_command は GETTER_ENV があれば即 return する)。
+/// trust が不要と**断言できる** env 構成なら、その根拠となる変数名を返す。
+/// trust は「.loadenv.sh 探索経路」(解決順 3) 専用の仕組みなので、探索が
+/// 走らないと確定する構成でだけ「不要」と言ってよい。
 fn external_auth_env() -> Option<&'static str> {
     external_auth_env_with(non_empty_env)
 }
@@ -179,10 +179,19 @@ fn external_auth_env() -> Option<&'static str> {
 /// env 参照を注入できる形にして、グローバル env を書き換えずにテストする
 /// (テストは並列実行されるため set_var はレースになる)。
 fn external_auth_env_with(lookup: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
-    // 優先順位は resolve() と揃える (直接キー > getter)。どちらでも trust は不要。
-    ["TASKSHOOT_API_KEY", GETTER_ENV]
-        .into_iter()
-        .find(|name| lookup(name).is_some())
+    // GETTER_ENV があれば find_getter_command が即 return するため、探索は必ず走らない。
+    if lookup(GETTER_ENV).is_some() {
+        return Some(GETTER_ENV);
+    }
+    // キーだけでは不十分: resolve() は `need_org && org_unresolved` の時、org を得る目的で
+    // getter 探索に入る (org スコープのコマンドで .loadenv.sh の trust が要る)。
+    // org も env で解決済みの時だけ探索が走らないと断言できる。
+    // (--org 指定でも走らないが、trust は config 解決前に動くのでここでは env のみ見る。
+    //  誤って「不要」と言うより、判定を絞る側に倒す。)
+    if lookup("TASKSHOOT_API_KEY").is_some() && lookup("TASKSHOOT_CLI_ORGANIZATION").is_some() {
+        return Some("TASKSHOOT_API_KEY");
+    }
+    None
 }
 
 /// bare `taskshoot trust` で候補が 1 つも見つからなかった場合の案内。
@@ -213,8 +222,8 @@ fn report_no_loadenv_candidate() -> Result<()> {
          `taskshoot trust` authorizes an existing .loadenv.sh to run its getter \
          command (direnv-style allow); it does not create one. You only need it \
          when credentials come from a discovered .loadenv.sh -- setting \
-         {GETTER_ENV} or TASKSHOOT_API_KEY in the environment instead makes \
-         trust unnecessary.\n\n\
+         {GETTER_ENV} (or both TASKSHOOT_API_KEY and TASKSHOOT_CLI_ORGANIZATION) \
+         in the environment instead makes trust unnecessary.\n\n\
          Searched (ancestors of the current directory, then of the executable):\n\
          {searched}\n\n\
          Pass an explicit path to trust a file outside these locations: \
@@ -439,22 +448,33 @@ mod tests {
     fn external_auth_env_detects_trust_free_setups() {
         // env に何も無い = .loadenv.sh 経路が必要 → trust は意味を持つ
         assert_eq!(external_auth_env_with(|_| None), None);
-        // getter を外部 (ラッパー / シェルプロファイル) が export 済み → trust 不要
+        // getter を外部 (ラッパー / シェルプロファイル) が export 済み → 探索は必ず
+        // スキップされるので trust 不要
         assert_eq!(
             external_auth_env_with(|name| (name == GETTER_ENV).then(|| "cat env".to_string())),
             Some(GETTER_ENV)
         );
-        // キー直接指定でも trust 不要
+        // キー + org が揃っていれば探索は走らない → trust 不要
+        assert_eq!(
+            external_auth_env_with(|name| matches!(
+                name,
+                "TASKSHOOT_API_KEY" | "TASKSHOOT_CLI_ORGANIZATION"
+            )
+            .then(|| "set".to_string())),
+            Some("TASKSHOOT_API_KEY")
+        );
+        // キーのみ・org 未解決は「不要」と断言できない: org スコープのコマンドは
+        // org を得るために .loadenv.sh を探索する (resolve の need_org 分岐)。
         assert_eq!(
             external_auth_env_with(
                 |name| (name == "TASKSHOOT_API_KEY").then(|| "tssk-dummy".to_string())
             ),
-            Some("TASKSHOOT_API_KEY")
+            None
         );
-        // 直接キーと getter の両方があれば resolve() と同じ優先順位で前者を報告する
+        // getter があれば org 未解決でも探索は走らない (GETTER_ENV が優先)
         assert_eq!(
-            external_auth_env_with(|_| Some("set".to_string())),
-            Some("TASKSHOOT_API_KEY")
+            external_auth_env_with(|name| (name == GETTER_ENV).then(|| "cat env".to_string())),
+            Some(GETTER_ENV)
         );
     }
 

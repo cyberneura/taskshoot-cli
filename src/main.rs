@@ -88,8 +88,11 @@ enum Cmd {
     /// (direnv-style allow; defaults to the nearest candidate)
     ///
     /// Only relevant when credentials come from a .loadenv.sh (precedence 3).
-    /// If TASKSHOOT_API_KEY or TASKSHOOT_CLI_ENV_GETTER_COMMAND is set in the
-    /// environment, the .loadenv.sh search never runs and trust is unnecessary.
+    /// Setting TASKSHOOT_CLI_ENV_GETTER_COMMAND -- or both TASKSHOOT_API_KEY and
+    /// TASKSHOOT_CLI_ORGANIZATION -- skips the .loadenv.sh search entirely, so
+    /// trust is unnecessary. Note that TASKSHOOT_API_KEY alone is not enough:
+    /// org-scoped commands still search for a .loadenv.sh to resolve the
+    /// organization when neither --org nor TASKSHOOT_CLI_ORGANIZATION is given.
     Trust { path: Option<PathBuf> },
 }
 
