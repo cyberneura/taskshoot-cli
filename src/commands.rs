@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
-use crate::api::{from_value, Api};
+use crate::api::{from_value, Api, TasksQuery};
 use crate::models::{AssignableUser, Me, Org, Project, Task, TaskEvent, Workflow};
 use crate::output::{print_table, truncate_width};
 use crate::stages;
@@ -226,6 +226,7 @@ pub fn workflows(api: &Api, project: &str, json: bool) -> Result<()> {
 pub struct TasksFilter {
     pub status: Option<String>,
     pub assignee: Option<String>,
+    pub mentioned: Option<String>,
     pub untracked: bool,
     pub tracked: bool,
     pub bot_ready: Option<bool>,
@@ -280,18 +281,28 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         Some(assignee) => Some(resolve_user_id(api, project, assignee)?),
         None => None,
     };
-    let has_filter = status.is_some() || assignee_id.is_some() || filter.bot_ready.is_some();
+    let mentioned_user_id = match &filter.mentioned {
+        Some(mentioned) => Some(resolve_user_id(api, project, mentioned)?),
+        None => None,
+    };
+    let has_filter = status.is_some()
+        || assignee_id.is_some()
+        || mentioned_user_id.is_some()
+        || filter.bot_ready.is_some();
     let limit = filter
         .limit
         .unwrap_or(if has_filter { 500 } else { 200 })
         .clamp(1, 500);
     let value = api.tasks(
         project,
-        tracked,
-        limit,
-        status,
-        assignee_id.as_deref(),
-        filter.bot_ready,
+        &TasksQuery {
+            tracked,
+            limit,
+            status,
+            assignee_id,
+            mentioned_user_id,
+            bot_ready: filter.bot_ready,
+        },
     )?;
     // --json でも API の生フィールドを保つため Value のまま扱う
     let mut items: Vec<Value> = from_value(value)?;

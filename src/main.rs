@@ -59,6 +59,11 @@ enum Cmd {
         /// (server-side)
         #[arg(long)]
         assignee: Option<String>,
+        /// Filter to tasks mentioning the user ("me", handle name, display
+        /// name, or user id) via @handle in description/comments, including
+        /// mention groups the user belongs to (server-side)
+        #[arg(long)]
+        mentioned: Option<String>,
         /// Only untracked (casual) tasks
         #[arg(long)]
         untracked: bool,
@@ -69,7 +74,7 @@ enum Cmd {
         #[arg(long)]
         bot_ready: Option<bool>,
         /// Max tasks returned (1-500; default 200, or 500 when
-        /// --status/--assignee/--bot-ready is used)
+        /// --status/--assignee/--mentioned/--bot-ready is used)
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -250,6 +255,7 @@ fn run() -> Result<()> {
             project,
             status,
             assignee,
+            mentioned,
             untracked,
             tracked,
             bot_ready,
@@ -260,6 +266,7 @@ fn run() -> Result<()> {
             &commands::TasksFilter {
                 status,
                 assignee,
+                mentioned,
                 untracked,
                 tracked,
                 bot_ready,

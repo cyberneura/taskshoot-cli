@@ -19,6 +19,16 @@ fn enc(segment: &str) -> String {
     utf8_percent_encode(segment, PATH_ENCODE).to_string()
 }
 
+/// tasks 一覧のサーバー側フィルタ (None のものはクエリに載せない)。
+pub struct TasksQuery {
+    pub tracked: Option<bool>,
+    pub limit: u32,
+    pub status: Option<i64>,
+    pub assignee_id: Option<String>,
+    pub mentioned_user_id: Option<String>,
+    pub bot_ready: Option<bool>,
+}
+
 pub struct Api {
     http: Client,
     origin: String,
@@ -109,26 +119,21 @@ impl Api {
         self.get(&self.org_path("projects/")?)
     }
 
-    pub fn tasks(
-        &self,
-        project: &str,
-        tracked: Option<bool>,
-        limit: u32,
-        status: Option<i64>,
-        assignee_id: Option<&str>,
-        bot_ready: Option<bool>,
-    ) -> Result<Value> {
-        let mut path = self.project_path(project, &format!("tasks/?limit={limit}"))?;
-        if let Some(tracked) = tracked {
+    pub fn tasks(&self, project: &str, query: &TasksQuery) -> Result<Value> {
+        let mut path = self.project_path(project, &format!("tasks/?limit={}", query.limit))?;
+        if let Some(tracked) = query.tracked {
             path.push_str(&format!("&tracked={tracked}"));
         }
-        if let Some(status) = status {
+        if let Some(status) = query.status {
             path.push_str(&format!("&status={status}"));
         }
-        if let Some(assignee_id) = assignee_id {
+        if let Some(assignee_id) = query.assignee_id.as_deref() {
             path.push_str(&format!("&assignee_id={}", enc(assignee_id)));
         }
-        if let Some(bot_ready) = bot_ready {
+        if let Some(mentioned_user_id) = query.mentioned_user_id.as_deref() {
+            path.push_str(&format!("&mentioned_user_id={}", enc(mentioned_user_id)));
+        }
+        if let Some(bot_ready) = query.bot_ready {
             path.push_str(&format!("&bot_ready={bot_ready}"));
         }
         self.get(&path)

@@ -79,6 +79,8 @@ taskshoot workflows --project DEV              # 進行フローとステージ�
 
 taskshoot tasks --project DEV                  # タスク一覧
 taskshoot tasks --project DEV --status 起案 --assignee me
+taskshoot tasks --project DEV --mentioned me   # 自分に @ メンションがあるタスク
+taskshoot tasks --project DEV --mentioned suzuki   # 特定の人宛 (handle / 表示名 / id も可)
 taskshoot tasks --project DEV --untracked      # casual タスクのみ
 taskshoot tasks --project DEV --bot-ready true # Bot が着手可のタスクのみ
 
@@ -106,6 +108,12 @@ taskshoot task resume DEV-12
 - `task complete` は workflow の terminal ステージへ変更する。プロジェクトの
   workflow に検収フローがある場合、タスクは完了ではなく検収フェーズに入る (仕様)。
   `--comment` は完了成功後にスレッドへ投稿される。
+- `tasks --mentioned <user>` は「そのユーザー宛の @ メンションが description か
+  コメントにあるタスク」に絞り込む (サーバー側フィルタ `mentioned_user_id`)。
+  ユーザーは `--assignee` と同じく "me" / handle name / 表示名 / user id で指定できる。
+  照合はフロントエンドのメンション表示と同じ規則 (handle_name、未設定なら
+  メール local part 由来のデフォルト handle) で、所属する MentionGroup 宛
+  (@dev-team 等) も含む。
 - `task create --status` は作成 API がステータスを初期ステージに戻す仕様のため、
   作成後に PATCH で反映している (見た目は 1 コマンド)。
 - `me` / `orgs` は組織未設定 (`TASKSHOOT_CLI_ORGANIZATION` なし) でも実行できる。
