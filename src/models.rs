@@ -91,6 +91,26 @@ impl Task {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct SearchResult {
+    pub id: String,
+    pub project_key: String,
+    pub number: Option<u64>,
+    pub title: String,
+    #[serde(default)]
+    pub status_label: String,
+}
+
+impl SearchResult {
+    /// 表示用 ID。tracked なら `KEY-番号`、untracked は UUID。
+    pub fn display_ref(&self) -> String {
+        match self.number {
+            Some(number) => format!("{}-{}", self.project_key, number),
+            None => self.id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Stage {
     pub value: i64,
     pub label: String,

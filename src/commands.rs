@@ -5,7 +5,9 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::api::{from_value, Api, TasksQuery};
-use crate::models::{AssignableUser, Me, Org, Project, Task, TaskCategory, TaskEvent, Workflow};
+use crate::models::{
+    AssignableUser, Me, Org, Project, SearchResult, Task, TaskCategory, TaskEvent, Workflow,
+};
 use crate::output::{print_table, truncate_width};
 use crate::stages;
 use crate::taskref::{parse_task_ref, TaskRef};
@@ -409,6 +411,30 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         &["REF", "STATUS", "PROG", "ASSIGNEE", "TITLE", "UPDATED"],
         &rows,
     );
+    Ok(())
+}
+
+pub fn search(api: &Api, query: &str, limit: u32, json: bool) -> Result<()> {
+    let value = api.search_tasks(query, limit.clamp(1, 50))?;
+    if json {
+        return print_json(&value);
+    }
+    let items: Vec<SearchResult> = from_value(value)?;
+    if items.is_empty() {
+        println!("no tasks matched");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|item| {
+            vec![
+                item.display_ref(),
+                item.status_label.clone(),
+                truncate_width(&item.title, 64),
+            ]
+        })
+        .collect();
+    print_table(&["REF", "STATUS", "TITLE"], &rows);
     Ok(())
 }
 

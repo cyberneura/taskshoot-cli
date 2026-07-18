@@ -100,6 +100,9 @@ taskshoot tasks --project DEV --mentioned suzuki   # 特定の人宛 (handle / �
 taskshoot tasks --project DEV --untracked      # casual タスクのみ
 taskshoot tasks --project DEV --bot-ready true # Bot が着手可のタスクのみ
 
+taskshoot search "検索 インデックス"          # 組織横断のタスク検索 (--limit 1-50)
+taskshoot search DEV-12                        # KEY-番号 の直接参照もヒットする
+
 taskshoot task show DEV-12
 taskshoot task create --project DEV --title "新機能" --description "..." --assignee me
 taskshoot task create --project DEV --content "メモ的な相談"   # untracked (番号なし)
@@ -136,6 +139,9 @@ taskshoot task resume DEV-12
 - `--category` (create / update) はカテゴリー名 (大文字小文字無視) か id で指定する。
   一覧は `taskshoot categories --project <KEY>`。`update --category ""` でクリアできる。
 - `me` / `orgs` は組織未設定 (`TASKSHOOT_CLI_ORGANIZATION` なし) でも実行できる。
+- `search` は組織内の全プロジェクト横断でタスクを検索する (`/task-search/` API)。
+  サーバー側は bigram (部分一致) + ベクトル (意味検索) のハイブリッド。タイトル /
+  description / コメント本文が対象で、`KEY-番号` や番号のみの入力は直接ヒットする。
 
 ### AI エージェントの定型フロー例
 

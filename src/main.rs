@@ -83,6 +83,14 @@ enum Cmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Search tasks across the organization (hybrid bigram + vector search)
+    Search {
+        /// Search query (text, or a task ref like KEY-12)
+        query: String,
+        /// Max results (1-50)
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
     /// Operate on a single task (reference: KEY-N, or UUID with --project)
     // TaskCmd は Update/Create 等がフィールド多数で飛び抜けて大きい variant なので、
     // clippy::large_enum_variant を避けるため Box 化して Cmd のサイズ差を抑える
@@ -294,6 +302,7 @@ fn run() -> Result<()> {
             },
             json,
         ),
+        Cmd::Search { query, limit } => commands::search(&api, &query, limit, json),
         Cmd::Task(task_cmd) => match *task_cmd {
             TaskCmd::Show { task, project } => {
                 commands::show(&api, &task, project.as_deref(), json)

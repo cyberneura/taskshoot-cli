@@ -139,6 +139,10 @@ impl Api {
         self.get(&path)
     }
 
+    pub fn search_tasks(&self, q: &str, limit: u32) -> Result<Value> {
+        self.get(&self.org_path(&format!("task-search/?q={}&limit={limit}", enc(q)))?)
+    }
+
     pub fn task_detail(&self, project: &str, task_ref: &str) -> Result<Value> {
         self.get(&self.task_path(project, task_ref, "/detail")?)
     }
