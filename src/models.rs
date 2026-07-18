@@ -60,6 +60,8 @@ pub struct Task {
     pub priority_label: String,
     #[serde(default)]
     pub progress: i64,
+    #[serde(default)]
+    pub category: Option<TaskCategory>,
     pub assignee: Option<TaskAuthor>,
     pub owner: Option<TaskAuthor>,
     pub reporter: Option<TaskAuthor>,
@@ -111,6 +113,18 @@ pub struct Workflow {
     pub is_default: bool,
     #[serde(default)]
     pub stages: Vec<Stage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskCategory {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub ordering: i64,
+    #[serde(default = "default_true")]
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -91,6 +91,7 @@ taskshoot me                                   # 認証確認 (誰として動�
 taskshoot orgs                                 # アクセス可能な組織一覧 (org 未設定でも可)
 taskshoot projects                             # プロジェクト一覧
 taskshoot workflows --project DEV              # 進行フローとステージ一覧 (値/ラベル/terminal)
+taskshoot categories --project DEV             # タスクカテゴリー一覧 (id/名前)
 
 taskshoot tasks --project DEV                  # タスク一覧
 taskshoot tasks --project DEV --status 起案 --assignee me
@@ -104,6 +105,7 @@ taskshoot task create --project DEV --title "新機能" --description "..." --as
 taskshoot task create --project DEV --content "メモ的な相談"   # untracked (番号なし)
 taskshoot task update DEV-12 --status 対応中 --progress 50
 taskshoot task update DEV-12 --bot-ready true  # Bot 着手可フラグ (変更はログに残る)
+taskshoot task update DEV-12 --category 開発   # カテゴリー設定 (名前 or id。"" でクリア)
 taskshoot task claim DEV-12                    # assignee=me + 対応中へ (--status で上書き可)
 taskshoot task claim DEV-12 --if-unassigned    # 未 assign の時だけ claim (他が取得済みなら 409)
 taskshoot task complete DEV-12 --comment "対応完了しました"     # 終端ステージへ
@@ -131,6 +133,8 @@ taskshoot task resume DEV-12
   (@dev-team 等) も含む。
 - `task create --status` は作成 API がステータスを初期ステージに戻す仕様のため、
   作成後に PATCH で反映している (見た目は 1 コマンド)。
+- `--category` (create / update) はカテゴリー名 (大文字小文字無視) か id で指定する。
+  一覧は `taskshoot categories --project <KEY>`。`update --category ""` でクリアできる。
 - `me` / `orgs` は組織未設定 (`TASKSHOOT_CLI_ORGANIZATION` なし) でも実行できる。
 
 ### AI エージェントの定型フロー例

@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::api::{from_value, Api, TasksQuery};
-use crate::models::{AssignableUser, Me, Org, Project, Task, TaskEvent, Workflow};
+use crate::models::{AssignableUser, Me, Org, Project, Task, TaskCategory, TaskEvent, Workflow};
 use crate::output::{print_table, truncate_width};
 use crate::stages;
 use crate::taskref::{parse_task_ref, TaskRef};
@@ -105,7 +105,7 @@ fn author_name(author: &Option<crate::models::TaskAuthor>) -> String {
 fn print_task_line(value: &Value, verb: &str) -> Result<()> {
     let task: Task = from_value(value.clone())?;
     println!(
-        "{} {}: {} / status: {} ({}) / phase: {} / assignee: {}",
+        "{} {}: {} / status: {} ({}) / phase: {} / assignee: {} / category: {}",
         verb,
         task.display_ref(),
         task.title,
@@ -113,6 +113,7 @@ fn print_task_line(value: &Value, verb: &str) -> Result<()> {
         task.status,
         task.phase,
         author_name(&task.assignee),
+        task.category.as_ref().map_or("-", |c| c.name.as_str()),
     );
     Ok(())
 }
@@ -221,6 +222,62 @@ pub fn workflows(api: &Api, project: &str, json: bool) -> Result<()> {
         println!();
     }
     Ok(())
+}
+
+pub fn categories(api: &Api, project: &str, json: bool) -> Result<()> {
+    let value = api.task_categories(project)?;
+    if json {
+        return print_json(&value);
+    }
+    let mut items: Vec<TaskCategory> = from_value(value)?;
+    items.sort_by_key(|c| c.ordering);
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|c| {
+            vec![
+                c.id.clone(),
+                c.name.clone(),
+                c.color.clone(),
+                if c.active {
+                    "active".to_string()
+                } else {
+                    "inactive".to_string()
+                },
+            ]
+        })
+        .collect();
+    print_table(&["ID", "NAME", "COLOR", "STATE"], &rows);
+    Ok(())
+}
+
+/// カテゴリー指定の解決: UUID → そのまま、それ以外はプロジェクトの
+/// カテゴリー名一致 (大文字小文字無視)。空文字は None (クリア)。
+fn resolve_category_id(api: &Api, project: &str, spec: &str) -> Result<Option<String>> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Ok(None);
+    }
+    if Uuid::parse_str(spec).is_ok() {
+        return Ok(Some(spec.to_string()));
+    }
+    let categories: Vec<TaskCategory> = from_value(api.task_categories(project)?)?;
+    let needle = spec.to_lowercase();
+    let matches: Vec<&TaskCategory> = categories
+        .iter()
+        .filter(|c| c.name.to_lowercase() == needle)
+        .collect();
+    match matches.len() {
+        1 => Ok(Some(matches[0].id.clone())),
+        0 => bail!(
+            "unknown category '{spec}' in this project; available: {}",
+            categories
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => bail!("category name '{spec}' is ambiguous; specify a category id"),
+    }
 }
 
 pub struct TasksFilter {
@@ -372,6 +429,9 @@ pub fn show(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> Res
         task.phase, task.status_label, task.status, task.progress
     );
     println!("priority: {}", task.priority_label);
+    if let Some(category) = &task.category {
+        println!("category: {}", category.name);
+    }
     println!("assignee: {}", author_name(&task.assignee));
     println!("owner:    {}", author_name(&task.owner));
     println!("reporter: {}", author_name(&task.reporter));
@@ -415,6 +475,7 @@ pub struct CreateArgs {
     pub priority: Option<i64>,
     pub due_date: Option<String>,
     pub labels: Vec<String>,
+    pub category: Option<String>,
 }
 
 pub fn create(api: &Api, args: &CreateArgs, json: bool) -> Result<()> {
@@ -459,6 +520,11 @@ pub fn create(api: &Api, args: &CreateArgs, json: bool) -> Result<()> {
     if !args.labels.is_empty() {
         body.insert("labels".to_string(), json!(args.labels));
     }
+    if let Some(category) = &args.category {
+        if let Some(category_id) = resolve_category_id(api, &args.project, category)? {
+            body.insert("category_id".to_string(), json!(category_id));
+        }
+    }
     let mut value = api.create_task_full(&args.project, &Value::Object(body))?;
     // 作成 API は init_lifecycle が status を初期ステージへリセットするため、
     // --status 指定は作成後の PATCH で反映する。
@@ -498,6 +564,7 @@ pub struct UpdateArgs {
     pub completed_at: Option<String>,
     pub labels: Option<Vec<String>>,
     pub bot_ready: Option<bool>,
+    pub category: Option<String>,
 }
 
 pub fn update(
@@ -559,6 +626,13 @@ pub fn update(
     }
     if let Some(bot_ready) = args.bot_ready {
         body.insert("bot_ready".to_string(), json!(bot_ready));
+    }
+    // 空文字は null (カテゴリーのクリア) として送る。
+    if let Some(category) = &args.category {
+        body.insert(
+            "category_id".to_string(),
+            json!(resolve_category_id(api, &project, category)?),
+        );
     }
     if body.is_empty() {
         bail!("nothing to update; pass at least one field option (see --help)");

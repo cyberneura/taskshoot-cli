@@ -48,6 +48,11 @@ enum Cmd {
         #[arg(long)]
         project: String,
     },
+    /// List task categories for a project
+    Categories {
+        #[arg(long)]
+        project: String,
+    },
     /// List tasks in a project
     Tasks {
         #[arg(long)]
@@ -112,7 +117,7 @@ enum TaskCmd {
         title: Option<String>,
         /// Create an untracked casual task from this message instead
         /// (tracked-task options cannot be combined)
-        #[arg(long, conflicts_with_all = ["title", "description", "status", "assignee", "owner", "priority", "due_date", "labels"])]
+        #[arg(long, conflicts_with_all = ["title", "description", "status", "assignee", "owner", "priority", "due_date", "labels", "category"])]
         content: Option<String>,
         #[arg(long)]
         description: Option<String>,
@@ -132,6 +137,9 @@ enum TaskCmd {
         /// Repeatable
         #[arg(long = "label")]
         labels: Vec<String>,
+        /// Category name or id (see `taskshoot categories`)
+        #[arg(long)]
+        category: Option<String>,
     },
     /// Update task fields
     Update {
@@ -172,6 +180,10 @@ enum TaskCmd {
         /// Bot が着手してよいか (true/false)
         #[arg(long)]
         bot_ready: Option<bool>,
+        /// Category name or id (see `taskshoot categories`). Empty string
+        /// clears it.
+        #[arg(long)]
+        category: Option<String>,
     },
     /// Claim a task: assign to me and move to the in-progress stage (対応中)
     Claim {
@@ -258,6 +270,7 @@ fn run() -> Result<()> {
         Cmd::Orgs => commands::orgs(&api, json),
         Cmd::Projects => commands::projects(&api, json),
         Cmd::Workflows { project } => commands::workflows(&api, &project, json),
+        Cmd::Categories { project } => commands::categories(&api, &project, json),
         Cmd::Tasks {
             project,
             status,
@@ -296,6 +309,7 @@ fn run() -> Result<()> {
                 priority,
                 due_date,
                 labels,
+                category,
             } => commands::create(
                 &api,
                 &commands::CreateArgs {
@@ -309,6 +323,7 @@ fn run() -> Result<()> {
                     priority,
                     due_date,
                     labels,
+                    category,
                 },
                 json,
             ),
@@ -327,6 +342,7 @@ fn run() -> Result<()> {
                 completed_at,
                 labels,
                 bot_ready,
+                category,
             } => commands::update(
                 &api,
                 &task,
@@ -344,6 +360,7 @@ fn run() -> Result<()> {
                     completed_at,
                     labels,
                     bot_ready,
+                    category,
                 },
                 json,
             ),

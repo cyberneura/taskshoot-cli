@@ -220,6 +220,10 @@ impl Api {
         self.get(&self.project_path(project, "workflows/")?)
     }
 
+    pub fn task_categories(&self, project: &str) -> Result<Value> {
+        self.get(&self.project_path(project, "task-categories/")?)
+    }
+
     pub fn assignable_users(&self, project: &str) -> Result<Value> {
         self.get(&self.project_path(project, "assignable-users/")?)
     }
