@@ -97,6 +97,9 @@ enum Cmd {
     // (clap は Box<T: Subcommand> の blanket impl を持つのでそのまま動く)。
     #[command(subcommand)]
     Task(Box<TaskCmd>),
+    /// List / mark-read your notifications (bot mention inbox; user-scoped)
+    #[command(subcommand)]
+    Notifications(NotificationsCmd),
     /// Allow executing the getter command of a discovered .loadenv.sh
     /// (direnv-style allow; defaults to the nearest candidate)
     ///
@@ -107,6 +110,28 @@ enum Cmd {
     /// org-scoped commands still search for a .loadenv.sh to resolve the
     /// organization when neither --org nor TASKSHOOT_CLI_ORGANIZATION is given.
     Trust { path: Option<PathBuf> },
+}
+
+#[derive(Subcommand)]
+enum NotificationsCmd {
+    /// List your notifications (newest first) with the unread count
+    List {
+        /// Max notifications returned (1-100)
+        #[arg(long, default_value_t = 30)]
+        limit: u32,
+        /// Only unread notifications
+        #[arg(long)]
+        unread_only: bool,
+    },
+    /// Mark notifications as read (by id, or --all). Prints the updated unread
+    /// count. Requires a write API key.
+    Read {
+        /// Notification ids to mark read (repeatable positional)
+        ids: Vec<String>,
+        /// Mark all unread notifications as read
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -266,8 +291,8 @@ fn run() -> Result<()> {
     if let Cmd::Trust { path } = &cli.command {
         return config::trust_loadenv(path.clone());
     }
-    // me / orgs は org 不要 (キーがあれば getter を起動しない)
-    let need_org = !matches!(cli.command, Cmd::Me | Cmd::Orgs);
+    // me / orgs / notifications は org 不要 (通知は user スコープ)
+    let need_org = !matches!(cli.command, Cmd::Me | Cmd::Orgs | Cmd::Notifications(_));
     let config = config::resolve(cli.org.clone(), need_org)?;
     let api = api::Api::new(&config)?;
     let json = cli.json;
@@ -410,6 +435,14 @@ fn run() -> Result<()> {
             } => commands::cancel(&api, &task, project.as_deref(), &reason, json),
             TaskCmd::Resume { task, project } => {
                 commands::resume(&api, &task, project.as_deref(), json)
+            }
+        },
+        Cmd::Notifications(notifications_cmd) => match notifications_cmd {
+            NotificationsCmd::List { limit, unread_only } => {
+                commands::notifications_list(&api, limit, unread_only, json)
+            }
+            NotificationsCmd::Read { ids, all } => {
+                commands::notifications_read(&api, &ids, all, json)
             }
         },
     }

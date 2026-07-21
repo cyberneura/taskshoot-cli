@@ -119,6 +119,16 @@ taskshoot task cancel DEV-12 --reason "重複のため"
 taskshoot task resume DEV-12
 ```
 
+通知 (mention inbox):
+
+```bash
+taskshoot notifications list                   # 自分宛の通知一覧 (新しい順) + 未読数
+taskshoot notifications list --unread-only     # 未読のみ
+taskshoot notifications list --limit 50 --json # AI エージェント向け (最大 100)
+taskshoot notifications read <id> [<id> ...]   # 指定 id を既読にする (要 write キー)
+taskshoot notifications read --all             # 全通知を既読にする
+```
+
 - タスク参照は `KEY-番号` (例 `DEV-12`)。untracked タスクは番号を持たないため
   UUID + `--project` で指定する。
 - `--status` はラベル (例 `対応中`) か数値 (例 `40`) のどちらでも指定できる。
@@ -138,7 +148,12 @@ taskshoot task resume DEV-12
   作成後に PATCH で反映している (見た目は 1 コマンド)。
 - `--category` (create / update) はカテゴリー名 (大文字小文字無視) か id で指定する。
   一覧は `taskshoot categories --project <KEY>`。`update --category ""` でクリアできる。
-- `me` / `orgs` は組織未設定 (`TASKSHOOT_CLI_ORGANIZATION` なし) でも実行できる。
+- `me` / `orgs` / `notifications` は組織未設定 (`TASKSHOOT_CLI_ORGANIZATION` なし)
+  でも実行できる (通知はユーザースコープで組織横断)。
+- `notifications` は自分宛の通知 (メンション / assign / status 変更等) を扱う。
+  ボットには通常 `task_mentioned` (= @bot 宛メンション) のみが届くので、
+  自律ループはこれを拾って着手判断に使える。`read` (既読化) は書き込みなので
+  write 権限キーが必要。既読は通知ごと (per-item) に記録される。
 - `search` は組織内の全プロジェクト横断でタスクを検索する (`/task-search/` API)。
   サーバー側は bigram (部分一致) + ベクトル (意味検索) のハイブリッド。タイトル /
   description / コメント本文が対象で、`KEY-番号` や番号のみの入力は直接ヒットする。

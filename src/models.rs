@@ -175,3 +175,42 @@ pub struct AssignableUser {
     #[serde(default)]
     pub handle_name: Option<String>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationTask {
+    pub project_key: String,
+    #[serde(default)]
+    pub number: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Notification {
+    pub id: String,
+    pub notification_type: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub read: bool,
+    pub created_at: String,
+    #[serde(default)]
+    pub task: Option<NotificationTask>,
+}
+
+impl Notification {
+    /// 関連タスクの表示 ref (`KEY-N`。untracked / タスク無しは "-")。
+    pub fn task_ref(&self) -> String {
+        match &self.task {
+            Some(task) => match task.number {
+                Some(number) => format!("{}-{}", task.project_key, number),
+                None => task.project_key.clone(),
+            },
+            None => "-".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationList {
+    pub items: Vec<Notification>,
+    pub unread_count: i64,
+}

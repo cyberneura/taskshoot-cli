@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use crate::api::{from_value, Api, TasksQuery};
 use crate::models::{
-    AssignableUser, Me, Org, Project, SearchResult, Task, TaskCategory, TaskEvent, Workflow,
+    AssignableUser, Me, NotificationList, Org, Project, SearchResult, Task, TaskCategory,
+    TaskEvent, Workflow,
 };
 use crate::output::{print_table, truncate_width};
 use crate::stages;
@@ -813,4 +814,54 @@ pub fn resume(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
         return print_json(&value);
     }
     print_task_line(&value, "resumed")
+}
+
+pub fn notifications_list(api: &Api, limit: u32, unread_only: bool, json: bool) -> Result<()> {
+    let value = api.notifications(limit.clamp(1, 100), unread_only)?;
+    if json {
+        return print_json(&value);
+    }
+    let list: NotificationList = from_value(value)?;
+    println!("unread: {}", list.unread_count);
+    if list.items.is_empty() {
+        println!("no notifications");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = list
+        .items
+        .iter()
+        .map(|n| {
+            let when: String = n.created_at.chars().take(10).collect();
+            vec![
+                n.id.clone(),
+                if n.read {
+                    String::new()
+                } else {
+                    "*".to_string()
+                },
+                n.notification_type.clone(),
+                n.task_ref(),
+                truncate_width(&n.body, 60),
+                when,
+            ]
+        })
+        .collect();
+    print_table(&["ID", "NEW", "TYPE", "TASK", "BODY", "WHEN"], &rows);
+    Ok(())
+}
+
+pub fn notifications_read(api: &Api, ids: &[String], all: bool, json: bool) -> Result<()> {
+    if !all && ids.is_empty() {
+        bail!("pass notification ids to mark read, or --all");
+    }
+    let value = api.mark_notifications_read(ids, all)?;
+    if json {
+        return print_json(&value);
+    }
+    let unread = value
+        .get("unread_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    println!("marked as read; unread now: {unread}");
+    Ok(())
 }

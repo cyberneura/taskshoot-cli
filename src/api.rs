@@ -231,6 +231,24 @@ impl Api {
     pub fn assignable_users(&self, project: &str) -> Result<Value> {
         self.get(&self.project_path(project, "assignable-users/")?)
     }
+
+    /// 自分宛の通知一覧 (org 非依存の user スコープ)。
+    pub fn notifications(&self, limit: u32, unread_only: bool) -> Result<Value> {
+        let mut path = format!("/api/user/notifications?limit={limit}");
+        if unread_only {
+            path.push_str("&unread_only=true");
+        }
+        self.get(&path)
+    }
+
+    /// 通知を既読にする (ids 指定 or all=true)。更新後の未読数を返す。
+    /// mark-read は書き込みなので write 権限キーが必要。
+    pub fn mark_notifications_read(&self, ids: &[String], all: bool) -> Result<Value> {
+        self.post(
+            "/api/user/notifications/mark-read",
+            &json!({ "ids": ids, "all": all }),
+        )
+    }
 }
 
 pub fn from_value<T: DeserializeOwned>(value: Value) -> Result<T> {
