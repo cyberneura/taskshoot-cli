@@ -95,6 +95,10 @@ taskshoot categories --project DEV             # タスクカテゴリー一覧 
 
 taskshoot tasks --project DEV                  # タスク一覧
 taskshoot tasks --project DEV --status 起案 --assignee me
+taskshoot tasks --project DEV --status 起案,対応中          # 複数指定は OR
+taskshoot tasks --project DEV --status 起案 --status 40     # 繰り返し指定でも OR
+taskshoot tasks --project DEV --exclude-status 完了         # status 除外 (--status とは排他)
+taskshoot tasks --project DEV --exclude-phase 完了,無効,却下,中止  # phase 除外 (終端タスクを外す)
 taskshoot tasks --project DEV --mentioned me   # 自分に @ メンションがあるタスク
 taskshoot tasks --project DEV --mentioned suzuki   # 特定の人宛 (handle / 表示名 / id も可)
 taskshoot tasks --project DEV --untracked      # casual タスクのみ
@@ -135,6 +139,25 @@ taskshoot notifications read --all             # 全通知を既読にする
   `task update` 等の単一タスク操作ではそのタスクの workflow のステージから解決する。
   `tasks --status` (一覧フィルタ) はプロジェクトの全 workflow から解決し、同一ラベルが
   複数の値に解決される場合はエラーになる (数値指定で回避)。
+- `tasks --status` / `tasks --exclude-status` は**複数指定できる** (カンマ区切りでも
+  フラグの繰り返しでも可)。複数値は OR で、`--status` が「いずれかに一致」、
+  `--exclude-status` が「いずれにも一致しない」。両者は排他 (include を指定するなら
+  exclude は不要なため)。サーバー側フィルタなので `limit` で切り詰める前に効く。
+- **`--exclude-status` にラベルを指定する時の注意**: サーバーは status を数値でしか
+  絞れないため、別 workflow が同じ数値に別ラベルを当てていると、そのラベルのタスクも
+  巻き込んで除外される。`--status` (include) はクライアント側でラベル再フィルタして
+  落とせるが、exclude は応答に既に含まれていないので回収できない。この状況を検出した
+  時は stderr に warning を出すので、正確に除きたい場合は workflow ごとの数値を
+  `taskshoot workflows --project <KEY>` で確認して数値指定する。
+- **`status` (ステージ) と `phase` (ライフサイクル) は別軸**。status は
+  起案 → … → 完了 のステージで、`--status` / `--exclude-status` はこれを絞る。
+  一方 `完了` `無効` `却下` `中止` は **phase** であって status ではない。特に「無効」は
+  phase=invalid にするだけで status を変えない (起案のまま無効になりうる) ので、
+  `--exclude-status` では終端タスクを漏れなく除外できない。**完了・無効等の終端を
+  外したい時は `--exclude-phase` を使う** (例: `--exclude-phase 完了,無効,却下,中止`)。
+  値はラベル (完了/無効/却下/中止/進行中/検収/着手前承認) か英字
+  (done/invalid/rejected/cancelled/in_progress/acceptance/pre_approval)。JSON の
+  `phase` フィールドは英字 value で返る。
 - `task complete` は workflow の terminal ステージへ変更する。プロジェクトの
   workflow に検収フローがある場合、タスクは完了ではなく検収フェーズに入る (仕様)。
   `--comment` は完了成功後にスレッドへ投稿される。

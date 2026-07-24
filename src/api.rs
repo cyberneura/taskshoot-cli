@@ -23,7 +23,12 @@ fn enc(segment: &str) -> String {
 pub struct TasksQuery {
     pub tracked: Option<bool>,
     pub limit: u32,
-    pub status: Option<i64>,
+    /// 複数指定は OR。空なら status フィルタ無し
+    pub status: Vec<i64>,
+    /// 除外する status。空なら除外無し
+    pub exclude_status: Vec<i64>,
+    /// 除外する phase (英字 value)。空なら除外無し
+    pub exclude_phase: Vec<String>,
     pub assignee_id: Option<String>,
     pub mentioned_user_id: Option<String>,
     pub bot_ready: Option<bool>,
@@ -124,8 +129,15 @@ impl Api {
         if let Some(tracked) = query.tracked {
             path.push_str(&format!("&tracked={tracked}"));
         }
-        if let Some(status) = query.status {
+        // 複数値は繰り返しクエリパラメータで送る (?status=10&status=40)
+        for status in &query.status {
             path.push_str(&format!("&status={status}"));
+        }
+        for status in &query.exclude_status {
+            path.push_str(&format!("&exclude_status={status}"));
+        }
+        for phase in &query.exclude_phase {
+            path.push_str(&format!("&exclude_phase={}", enc(phase)));
         }
         if let Some(assignee_id) = query.assignee_id.as_deref() {
             path.push_str(&format!("&assignee_id={}", enc(assignee_id)));

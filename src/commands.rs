@@ -284,7 +284,9 @@ fn resolve_category_id(api: &Api, project: &str, spec: &str) -> Result<Option<St
 }
 
 pub struct TasksFilter {
-    pub status: Option<String>,
+    pub status: Vec<String>,
+    pub exclude_status: Vec<String>,
+    pub exclude_phase: Vec<String>,
     pub assignee: Option<String>,
     pub mentioned: Option<String>,
     pub untracked: bool,
@@ -293,16 +295,44 @@ pub struct TasksFilter {
     pub limit: Option<u32>,
 }
 
-/// 一覧フィルタ用の status 解決。ラベルはプロジェクトの全 workflow から引き、
-/// 複数フローで同一ラベルが異なる値になる場合はエラー (数値指定を促す)。
-fn resolve_list_status(api: &Api, project: &str, input: &str) -> Result<i64> {
-    let input = input.trim();
-    if let Ok(value) = input.parse::<i64>() {
-        return Ok(value);
+/// phase (TaskPhase) はラベルでも英字 value でも受け、API 用の英字 value に正規化する。
+/// status と違い固定 enum なので workflow API を叩かずローカルで解決する
+/// (backend `task/models.py` の TaskPhase と一致させること)。
+fn resolve_phase(input: &str) -> Result<&'static str> {
+    match input.trim() {
+        "pre_approval" | "着手前承認" => Ok("pre_approval"),
+        "in_progress" | "進行中" => Ok("in_progress"),
+        "acceptance" | "検収" => Ok("acceptance"),
+        "done" | "完了" => Ok("done"),
+        "rejected" | "却下" => Ok("rejected"),
+        "cancelled" | "中止" => Ok("cancelled"),
+        "invalid" | "無効" => Ok("invalid"),
+        "" => bail!("empty phase value (check for a stray comma)"),
+        other => bail!(
+            "unknown phase '{other}' (expected one of: 着手前承認/進行中/検収/完了/\
+             却下/中止/無効, or their english values pre_approval/in_progress/\
+             acceptance/done/rejected/cancelled/invalid)"
+        ),
     }
-    let workflows: Vec<Workflow> = from_value(api.project_workflows(project)?)?;
+}
+
+/// phase の複数指定を英字 value のリストに解決する (重複は畳む)。
+fn resolve_phases(inputs: &[String]) -> Result<Vec<String>> {
+    let mut values: Vec<String> = Vec::new();
+    for input in inputs {
+        let value = resolve_phase(input)?.to_string();
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    Ok(values)
+}
+
+/// 一覧フィルタ用の status ラベル解決。プロジェクトの全 workflow から引き、
+/// 複数フローで同一ラベルが異なる値になる場合はエラー (数値指定を促す)。
+fn resolve_list_status_label(workflows: &[Workflow], input: &str) -> Result<i64> {
     let mut matches: Vec<(i64, String)> = Vec::new();
-    for flow in &workflows {
+    for flow in workflows {
         if let Some(stage) = flow.stages.iter().find(|s| s.active && s.label == input) {
             if !matches.iter().any(|(value, _)| *value == stage.value) {
                 matches.push((stage.value, flow.name.clone()));
@@ -324,6 +354,86 @@ fn resolve_list_status(api: &Api, project: &str, input: &str) -> Result<i64> {
     }
 }
 
+/// status フィルタの解決結果。
+///
+/// サーバーは status を数値でしか絞れないため、別 workflow が同じ数値に別ラベルを
+/// 使っていると、ラベル指定でも他ラベルのタスクが巻き込まれる。include 側は
+/// `labels` / `numeric_values` でクライアント再フィルタして落とせるが、exclude 側は
+/// サーバーが既に落としているので回収できない (`collisions` で警告するだけ)。
+#[derive(Default)]
+struct ResolvedStatuses {
+    /// サーバーへ送る status 値 (重複排除済み)
+    values: Vec<i64>,
+    /// ラベルで指定された分 (再フィルタ用)
+    labels: Vec<String>,
+    /// 数値で直接指定された分 (再フィルタでラベル不一致でも残す)
+    numeric_values: Vec<i64>,
+    /// ラベル指定した値が他ラベルとも衝突している場合の説明
+    collisions: Vec<String>,
+}
+
+impl ResolvedStatuses {
+    fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+/// 別 workflow が同じ数値に別ラベルを当てている箇所を列挙する。
+fn status_value_collisions(workflows: &[Workflow], label: &str, value: i64) -> Vec<String> {
+    let mut out = Vec::new();
+    for flow in workflows {
+        for stage in &flow.stages {
+            if stage.active && stage.value == value && stage.label != label {
+                out.push(format!(
+                    "{label} (={value}) also matches '{}' in {}",
+                    stage.label, flow.name
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// 一覧フィルタ用の status 解決 (複数指定対応)。ラベルが 1 つでも含まれる時だけ
+/// workflow を 1 回取得し、全ラベルをそれで解決する (指定数だけ API を叩かない)。
+/// 重複は畳む。
+fn resolve_list_statuses(api: &Api, project: &str, inputs: &[String]) -> Result<ResolvedStatuses> {
+    if inputs.is_empty() {
+        return Ok(ResolvedStatuses::default());
+    }
+    let inputs: Vec<&str> = inputs.iter().map(|s| s.trim()).collect();
+    if inputs.iter().any(|s| s.is_empty()) {
+        bail!("empty status value (check for a stray comma)");
+    }
+    let needs_labels = inputs.iter().any(|s| s.parse::<i64>().is_err());
+    let workflows: Vec<Workflow> = if needs_labels {
+        from_value(api.project_workflows(project)?)?
+    } else {
+        Vec::new()
+    };
+    let mut resolved = ResolvedStatuses::default();
+    for input in inputs {
+        let value = match input.parse::<i64>() {
+            Ok(value) => {
+                resolved.numeric_values.push(value);
+                value
+            }
+            Err(_) => {
+                let value = resolve_list_status_label(&workflows, input)?;
+                resolved.labels.push(input.to_string());
+                resolved
+                    .collisions
+                    .extend(status_value_collisions(&workflows, input, value));
+                value
+            }
+        };
+        if !resolved.values.contains(&value) {
+            resolved.values.push(value);
+        }
+    }
+    Ok(resolved)
+}
+
 pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Result<()> {
     let tracked = if filter.untracked {
         Some(false)
@@ -333,10 +443,10 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         None
     };
     // status / assignee はサーバー側フィルタに解決して渡す
-    let status = match &filter.status {
-        Some(status) => Some(resolve_list_status(api, project, status)?),
-        None => None,
-    };
+    // (--status と --exclude-status は clap で排他なので workflow 取得は最大 1 回)
+    let status = resolve_list_statuses(api, project, &filter.status)?;
+    let exclude_status = resolve_list_statuses(api, project, &filter.exclude_status)?;
+    let exclude_phase = resolve_phases(&filter.exclude_phase)?;
     let assignee_id = match &filter.assignee {
         Some(assignee) => Some(resolve_user_id(api, project, assignee)?),
         None => None,
@@ -345,10 +455,21 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         Some(mentioned) => Some(resolve_user_id(api, project, mentioned)?),
         None => None,
     };
-    let has_filter = status.is_some()
+    let has_filter = !status.is_empty()
+        || !exclude_status.is_empty()
+        || !exclude_phase.is_empty()
         || assignee_id.is_some()
         || mentioned_user_id.is_some()
         || filter.bot_ready.is_some();
+    // exclude はサーバー側で数値として落ちるため、同じ数値の別ラベル分も
+    // 巻き込まれる。クライアントでは戻せない (既に応答に無い) ので警告に留める
+    if !exclude_status.collisions.is_empty() {
+        eprintln!(
+            "warning: --exclude-status also removed tasks whose label differs but \
+             shares the status value: {}",
+            exclude_status.collisions.join("; ")
+        );
+    }
     let limit = filter
         .limit
         .unwrap_or(if has_filter { 500 } else { 200 })
@@ -358,7 +479,9 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         &TasksQuery {
             tracked,
             limit,
-            status,
+            status: status.values.clone(),
+            exclude_status: exclude_status.values,
+            exclude_phase,
             assignee_id,
             mentioned_user_id,
             bot_ready: filter.bot_ready,
@@ -374,14 +497,17 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         );
     }
     // ラベル指定時はラベル完全一致で再フィルタする。サーバーは数値でしか絞れず、
-    // 別 workflow が同じ数値に別ラベルを使っているとその分が混入するため
-    if let Some(label) = filter
-        .status
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| s.parse::<i64>().is_err())
-    {
-        items.retain(|t| t["status_label"].as_str() == Some(label));
+    // 別 workflow が同じ数値に別ラベルを使っているとその分が混入するため。
+    // 数値で直接指定された分はラベルを問わず残す (ラベルと数値の混在指定に対応)
+    if !status.labels.is_empty() {
+        items.retain(|t| {
+            t["status_label"]
+                .as_str()
+                .is_some_and(|label| status.labels.iter().any(|l| l == label))
+                || t["status"]
+                    .as_i64()
+                    .is_some_and(|value| status.numeric_values.contains(&value))
+        });
     }
 
     if json {
@@ -864,4 +990,108 @@ pub fn notifications_read(api: &Api, ids: &[String], all: bool, json: bool) -> R
         .unwrap_or(0);
     println!("marked as read; unread now: {unread}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workflows(spec: &[(&str, &[(i64, &str)])]) -> Vec<Workflow> {
+        let value = json!(spec
+            .iter()
+            .map(|(name, stages)| json!({
+                "name": name,
+                "stages": stages
+                    .iter()
+                    .map(|(value, label)| json!({"value": value, "label": label}))
+                    .collect::<Vec<_>>(),
+            }))
+            .collect::<Vec<_>>());
+        from_value(value).unwrap()
+    }
+
+    #[test]
+    fn resolves_label_from_single_workflow() {
+        let flows = workflows(&[("default", &[(10, "起案"), (40, "対応中")])]);
+        assert_eq!(resolve_list_status_label(&flows, "対応中").unwrap(), 40);
+    }
+
+    #[test]
+    fn same_label_same_value_across_workflows_is_not_ambiguous() {
+        let flows = workflows(&[
+            ("default", &[(40, "対応中")]),
+            ("review", &[(40, "対応中"), (50, "検収中")]),
+        ]);
+        assert_eq!(resolve_list_status_label(&flows, "対応中").unwrap(), 40);
+    }
+
+    #[test]
+    fn same_label_different_values_is_an_error() {
+        let flows = workflows(&[
+            ("default", &[(40, "対応中")]),
+            ("review", &[(45, "対応中")]),
+        ]);
+        assert!(resolve_list_status_label(&flows, "対応中").is_err());
+    }
+
+    #[test]
+    fn unknown_label_is_an_error() {
+        let flows = workflows(&[("default", &[(10, "起案")])]);
+        assert!(resolve_list_status_label(&flows, "なにこれ").is_err());
+    }
+
+    #[test]
+    fn inactive_stage_is_not_matched() {
+        let value = json!([{
+            "name": "default",
+            "stages": [{"value": 10, "label": "起案", "active": false}],
+        }]);
+        let flows: Vec<Workflow> = from_value(value).unwrap();
+        assert!(resolve_list_status_label(&flows, "起案").is_err());
+    }
+
+    #[test]
+    fn detects_same_value_used_by_a_different_label() {
+        // 別 workflow が 40 に別ラベルを当てている: exclude では巻き込みが起きる
+        let flows = workflows(&[
+            ("default", &[(40, "対応中")]),
+            ("review", &[(40, "レビュー中")]),
+        ]);
+        let collisions = status_value_collisions(&flows, "対応中", 40);
+        assert_eq!(collisions.len(), 1);
+        assert!(collisions[0].contains("レビュー中"));
+        assert!(collisions[0].contains("review"));
+    }
+
+    #[test]
+    fn no_collision_when_value_is_used_consistently() {
+        let flows = workflows(&[
+            ("default", &[(40, "対応中")]),
+            ("review", &[(40, "対応中")]),
+        ]);
+        assert!(status_value_collisions(&flows, "対応中", 40).is_empty());
+    }
+
+    #[test]
+    fn resolves_phase_from_label_and_english_value() {
+        assert_eq!(resolve_phase("無効").unwrap(), "invalid");
+        assert_eq!(resolve_phase("完了").unwrap(), "done");
+        assert_eq!(resolve_phase("invalid").unwrap(), "invalid");
+        assert_eq!(resolve_phase(" 進行中 ").unwrap(), "in_progress");
+    }
+
+    #[test]
+    fn unknown_phase_is_an_error() {
+        // 起案 は status であって phase ではない
+        assert!(resolve_phase("起案").is_err());
+        assert!(resolve_phase("bogus").is_err());
+        assert!(resolve_phase("").is_err());
+    }
+
+    #[test]
+    fn resolve_phases_dedupes_across_label_and_value() {
+        // "無効" と "invalid" は同じ value に畳まれる
+        let out = resolve_phases(&["完了".into(), "無効".into(), "invalid".into()]).unwrap();
+        assert_eq!(out, vec!["done".to_string(), "invalid".to_string()]);
+    }
 }

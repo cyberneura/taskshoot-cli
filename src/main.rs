@@ -57,9 +57,22 @@ enum Cmd {
     Tasks {
         #[arg(long)]
         project: String,
-        /// Filter by status label (e.g. 起案) or numeric value (server-side)
-        #[arg(long)]
-        status: Option<String>,
+        /// Filter by status label (e.g. 起案) or numeric value (server-side).
+        /// Repeatable and comma-separated; multiple values are OR'd
+        /// (e.g. --status 起案,対応中)
+        #[arg(long, value_delimiter = ',')]
+        status: Vec<String>,
+        /// Exclude these statuses (label or numeric; repeatable and
+        /// comma-separated). Cannot be combined with --status
+        #[arg(long, value_delimiter = ',', conflicts_with = "status")]
+        exclude_status: Vec<String>,
+        /// Exclude tasks in these lifecycle phases (label or english value;
+        /// repeatable and comma-separated). phase is independent of status --
+        /// e.g. "無効" (invalid) keeps its status, so only this excludes it.
+        /// Values: 進行中/in_progress 完了/done 無効/invalid 却下/rejected
+        /// 中止/cancelled 検収/acceptance 着手前承認/pre_approval
+        #[arg(long, value_delimiter = ',')]
+        exclude_phase: Vec<String>,
         /// Filter by assignee: "me", handle name, display name, or user id
         /// (server-side)
         #[arg(long)]
@@ -78,8 +91,8 @@ enum Cmd {
         /// Filter by Bot Ready flag (true/false); bot loops use --bot-ready true
         #[arg(long)]
         bot_ready: Option<bool>,
-        /// Max tasks returned (1-500; default 200, or 500 when
-        /// --status/--assignee/--mentioned/--bot-ready is used)
+        /// Max tasks returned (1-500; default 200, or 500 when a
+        /// status/phase/assignee/mentioned/bot-ready filter is used)
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -307,6 +320,8 @@ fn run() -> Result<()> {
         Cmd::Tasks {
             project,
             status,
+            exclude_status,
+            exclude_phase,
             assignee,
             mentioned,
             untracked,
@@ -318,6 +333,8 @@ fn run() -> Result<()> {
             &project,
             &commands::TasksFilter {
                 status,
+                exclude_status,
+                exclude_phase,
                 assignee,
                 mentioned,
                 untracked,
