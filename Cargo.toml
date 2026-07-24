@@ -11,6 +11,8 @@ homepage = "https://taskshoot.com"
 readme = "README.md"
 keywords = ["taskshoot", "cli", "task", "productivity"]
 categories = ["command-line-utilities"]
+# Claude Code plugin marketplace 用のファイルは crate に含めない。
+exclude = ["/plugins", "/.claude-plugin"]
 
 [[bin]]
 name = "taskshoot"

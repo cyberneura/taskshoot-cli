@@ -1,0 +1,8 @@
+{
+  "name": "taskshoot",
+  "description": "Taskshoot CLI usage and an autonomous agent-loop skill",
+  "version": "0.1.0",
+  "author": {
+    "name": "Cyberneura"
+  }
+}

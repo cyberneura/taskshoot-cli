@@ -1,0 +1,166 @@
+---
+name: taskshoot-cli
+description: Operate Taskshoot tasks from the command line — list, search, claim, comment, and complete tasks via the `taskshoot` CLI. Use when working with taskshoot.com tasks or when an AI agent needs to pick up and resolve tasks.
+---
+
+# Taskshoot CLI
+
+`taskshoot` is a command-line client for [Taskshoot](https://taskshoot.com), a task
+manager with a Slack-like chat UI. It drives the task operations you would otherwise do
+in the web UI (list, search, claim, comment, complete, ...) from your terminal.
+
+Every command supports `--json` (raw JSON output) and `--org <code>` (override the
+organization), and returns exit code `0` on success / `1` on error, so it composes
+cleanly in scripts and autonomous agent loops. To run a full autonomous pick-up loop,
+also read the `taskshoot-agent-loop` skill.
+
+## Installation
+
+Install the `taskshoot` binary (see the project README for full details):
+
+```bash
+brew install cyberneura/tap/taskshoot            # Homebrew (macOS / Linux)
+cargo install taskshoot                          # Cargo
+# or a shell-script / PowerShell installer, or prebuilt binaries from GitHub Releases.
+```
+
+Verify it is on your `PATH` with `taskshoot --help`.
+
+## Authentication
+
+An API key (`tssk-...`) is required. It is issued from Taskshoot under
+`/settings/api-keys` (a personal key) or from a Bot user in organization management.
+**Write operations require a write-scoped key**; a read key only allows GET-style reads.
+
+The key and organization are resolved in this order:
+
+1. **Environment variables** — `TASKSHOOT_API_KEY` and `TASKSHOOT_CLI_ORGANIZATION`.
+   Use this for CI or an AI agent that passes credentials directly. Exporting both skips
+   any file discovery.
+2. **Getter command** — the command in `TASKSHOOT_CLI_ENV_GETTER_COMMAND` is run (without
+   a shell) and its stdout is parsed as an env-file (`KEY=VALUE`, `#` comments allowed).
+   Useful for fetching the key from a secret manager on demand.
+3. **`.loadenv.sh` discovery** — the CLI searches upward from the current directory and
+   from the executable's directory for a `.loadenv.sh`, and runs only its
+   `export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...` line. A discovered file must be approved
+   once with `taskshoot trust <path>` (direnv-style; re-approve if you edit it).
+
+Notes:
+
+- `TASKSHOOT_API_KEY` alone is not enough for org-scoped commands: without
+  `TASKSHOOT_CLI_ORGANIZATION` (or `--org`) they fall back to `.loadenv.sh` discovery to
+  resolve the organization. `me` / `orgs` / `notifications` need no org and work with the
+  key alone.
+- The API endpoint defaults to `https://taskshoot-api.cyberneura.com`. Point at a local
+  dev server with `export TASKSHOOT_API_ORIGIN=http://127.0.0.1:8008`.
+- **Never print a raw API key to stdout or a transcript.** Pass it via env vars or a
+  getter command.
+
+First, confirm who you are authenticated as:
+
+```bash
+taskshoot me      # who am I (id / organization) — use this to verify auth
+taskshoot orgs    # organizations you can access (works with no org set)
+```
+
+## Core commands
+
+### List and inspect
+
+```bash
+taskshoot projects                              # list projects
+taskshoot workflows --project DEV               # progress flows and stages (value / label / terminal)
+taskshoot categories --project DEV              # task categories (id / name)
+
+taskshoot tasks --project DEV                   # list tasks
+taskshoot tasks --project DEV --status draft --assignee me
+taskshoot tasks --project DEV --status draft,in-progress            # multiple values are OR'd
+taskshoot tasks --project DEV --exclude-status done                # exclude a status (exclusive with --status)
+taskshoot tasks --project DEV --exclude-phase done,invalid,rejected,cancelled  # drop terminal tasks
+taskshoot tasks --project DEV --mentioned me    # tasks that @-mention you
+taskshoot tasks --project DEV --bot-ready true  # only tasks a bot may pick up
+taskshoot tasks --project DEV --untracked       # casual (numberless) tasks only
+
+taskshoot search "search index"                 # org-wide task search (--limit 1-50)
+taskshoot search DEV-12                          # a KEY-number reference matches directly
+
+taskshoot task show DEV-12                       # details (bot_ready / assignee / phase / status)
+taskshoot task events DEV-12                     # show the chat thread
+```
+
+### Create, update, and lifecycle
+
+```bash
+taskshoot task create --project DEV --title "New feature" --description "..." --assignee me
+taskshoot task create --project DEV --content "a casual note"       # untracked (no number)
+
+taskshoot task update DEV-12 --status in-progress --progress 50
+taskshoot task update DEV-12 --bot-ready true    # bot-ready flag (change is logged)
+taskshoot task update DEV-12 --category Dev      # set category (name or id; "" clears it)
+taskshoot task update DEV-12 --started-at "$(date -Iseconds)"       # record start time (ISO8601)
+taskshoot task update DEV-12 --completed-at "$(date -Iseconds)"     # record completion time (ISO8601)
+
+taskshoot task claim DEV-12                       # assignee=me + move to in-progress
+taskshoot task claim DEV-12 --if-unassigned       # claim only if unassigned (409 if already taken)
+taskshoot task comment DEV-12 "progress update" --file ./screenshot.png
+taskshoot task complete DEV-12 --comment "Done"   # move to the terminal stage
+taskshoot task cancel DEV-12 --reason "duplicate"
+taskshoot task resume DEV-12
+taskshoot task track <uuid> --project DEV          # untracked -> tracked (assigns a number)
+```
+
+### Notifications (mention inbox)
+
+```bash
+taskshoot notifications list                     # your notifications (newest first) + unread count
+taskshoot notifications list --unread-only
+taskshoot notifications read <id> [<id> ...]     # mark ids read (needs a write key)
+taskshoot notifications read --all
+```
+
+## Key concepts
+
+- **Task references are `KEY-number`** (e.g. `DEV-12`). Untracked tasks have no number, so
+  reference them by UUID plus `--project`.
+- **`status` (stage) and `phase` (lifecycle) are independent axes.** This is the single
+  most common source of mistakes:
+  - `status` is the workflow *stage* (draft -> ... -> done). `--status` and
+    `--exclude-status` filter on it.
+  - `done`, `invalid`, `rejected`, `cancelled` are **phases, not statuses.** In
+    particular, marking a task "invalid" only sets `phase=invalid` and leaves the stage
+    unchanged (a task can be invalid while still in the "draft" stage). So
+    `--exclude-status` cannot reliably remove terminal tasks.
+  - **To drop terminal tasks, use `--exclude-phase done,invalid,rejected,cancelled`.**
+    Values may be a label or the english value (`done` / `invalid` / `rejected` /
+    `cancelled` / `in_progress` / `acceptance` / `pre_approval`). The JSON `phase` field
+    is returned as the english value.
+- **`--status` / `--exclude-status` accept multiple values** (comma-separated or by
+  repeating the flag) and are OR'd; the two flags are mutually exclusive. Both are
+  server-side filters, so they apply *before* `--limit` truncation — more accurate than
+  filtering the JSON with `jq`. `--status` accepts a label or a numeric value; if a label
+  maps to more than one workflow value it errors, so pass the numeric value (look it up
+  with `taskshoot workflows --project <KEY>`).
+- **`--mentioned <user>`** narrows to tasks whose description or a comment @-mentions that
+  user. Give `me`, a handle name, a display name, or a user id. Mentions of groups the
+  user belongs to are included.
+- **`task complete`** moves to the workflow's terminal stage. If the project has an
+  acceptance flow, the task enters the acceptance phase instead of being completed (by
+  design). `--comment` is posted to the thread after completion succeeds.
+- **`--started-at` / `--completed-at` are not set automatically** by `claim` / `complete`.
+  If you want them recorded, set them explicitly with `task update` at the moment of start
+  / completion (`date -Iseconds` produces an accepted ISO8601 value; `""` clears to null).
+- **`search`** runs an org-wide hybrid (substring + semantic) search over titles,
+  descriptions and comment bodies. A `KEY-number` or bare number matches directly.
+
+## Example AI-agent flow
+
+```bash
+taskshoot tasks --project DEV --bot-ready true --status draft --json   # find pickable, unstarted tasks
+taskshoot task claim DEV-12 --if-unassigned --json     # claim it (avoids double-processing: 409 if taken)
+taskshoot task comment DEV-12 "Starting now" --json
+# ... development ...
+taskshoot task complete DEV-12 --comment "Done. PR: <URL>" --json
+```
+
+To run this continuously as an autonomous loop (multiple agents, no double-processing),
+read the `taskshoot-agent-loop` skill.
