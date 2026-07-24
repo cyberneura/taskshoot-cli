@@ -18,8 +18,8 @@ fn print_json(value: &Value) -> Result<()> {
     Ok(())
 }
 
-/// タスク引数 (KEY-N or UUID) からプロジェクトキーと API 用 task_ref を得る。
-/// スラッグはキーを内包するので --project より優先。UUID は --project が必須。
+/// From a task argument (KEY-N or UUID), derive the project key and the API task_ref.
+/// A slug embeds the key, so it takes precedence over --project. A UUID requires --project.
 fn resolve_target(task_arg: &str, project: Option<&str>) -> Result<(String, String)> {
     let task_ref = parse_task_ref(task_arg)?;
     match &task_ref {
@@ -39,8 +39,8 @@ fn resolve_target(task_arg: &str, project: Option<&str>) -> Result<(String, Stri
     }
 }
 
-/// assignee/owner 指定の解決: "me" → 自分、UUID → そのまま、
-/// それ以外は assignable-users の handle_name / display_name 一致 (大文字小文字無視)。
+/// Resolve an assignee/owner spec: "me" → yourself, UUID → as-is, otherwise
+/// match handle_name / display_name of assignable-users (case-insensitive).
 fn resolve_user_id(api: &Api, project: &str, spec: &str) -> Result<String> {
     if spec == "me" {
         let me: Me = from_value(api.me()?)?;
@@ -253,8 +253,8 @@ pub fn categories(api: &Api, project: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// カテゴリー指定の解決: UUID → そのまま、それ以外はプロジェクトの
-/// カテゴリー名一致 (大文字小文字無視)。空文字は None (クリア)。
+/// Resolve a category spec: UUID → as-is, otherwise match a category name in the
+/// project (case-insensitive). An empty string means None (clear it).
 fn resolve_category_id(api: &Api, project: &str, spec: &str) -> Result<Option<String>> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -295,9 +295,10 @@ pub struct TasksFilter {
     pub limit: Option<u32>,
 }
 
-/// phase (TaskPhase) はラベルでも英字 value でも受け、API 用の英字 value に正規化する。
-/// status と違い固定 enum なので workflow API を叩かずローカルで解決する
-/// (backend `task/models.py` の TaskPhase と一致させること)。
+/// A phase (TaskPhase) is accepted as either a label or an english value and is
+/// normalized to the english value used by the API. Unlike status it is a fixed
+/// enum, so it is resolved locally without hitting the workflow API (keep this in
+/// sync with TaskPhase in the backend `task/models.py`).
 fn resolve_phase(input: &str) -> Result<&'static str> {
     match input.trim() {
         "pre_approval" | "着手前承認" => Ok("pre_approval"),
@@ -316,7 +317,7 @@ fn resolve_phase(input: &str) -> Result<&'static str> {
     }
 }
 
-/// phase の複数指定を英字 value のリストに解決する (重複は畳む)。
+/// Resolve multiple phase specs into a list of english values (deduped).
 fn resolve_phases(inputs: &[String]) -> Result<Vec<String>> {
     let mut values: Vec<String> = Vec::new();
     for input in inputs {
@@ -328,8 +329,9 @@ fn resolve_phases(inputs: &[String]) -> Result<Vec<String>> {
     Ok(values)
 }
 
-/// 一覧フィルタ用の status ラベル解決。プロジェクトの全 workflow から引き、
-/// 複数フローで同一ラベルが異なる値になる場合はエラー (数値指定を促す)。
+/// Resolve a status label for list filtering. Looks across all of the project's
+/// workflows, and errors if the same label maps to different values across flows
+/// (prompting a numeric value instead).
 fn resolve_list_status_label(workflows: &[Workflow], input: &str) -> Result<i64> {
     let mut matches: Vec<(i64, String)> = Vec::new();
     for flow in workflows {
@@ -354,21 +356,23 @@ fn resolve_list_status_label(workflows: &[Workflow], input: &str) -> Result<i64>
     }
 }
 
-/// status フィルタの解決結果。
+/// The result of resolving a status filter.
 ///
-/// サーバーは status を数値でしか絞れないため、別 workflow が同じ数値に別ラベルを
-/// 使っていると、ラベル指定でも他ラベルのタスクが巻き込まれる。include 側は
-/// `labels` / `numeric_values` でクライアント再フィルタして落とせるが、exclude 側は
-/// サーバーが既に落としているので回収できない (`collisions` で警告するだけ)。
+/// The server can only filter status by numeric value, so if another workflow
+/// uses the same value with a different label, filtering by label still sweeps in
+/// tasks of that other label. On the include side these can be dropped by
+/// client-side re-filtering via `labels` / `numeric_values`, but on the exclude
+/// side the server has already dropped them so they cannot be recovered (we only
+/// warn via `collisions`).
 #[derive(Default)]
 struct ResolvedStatuses {
-    /// サーバーへ送る status 値 (重複排除済み)
+    /// Status values to send to the server (deduplicated)
     values: Vec<i64>,
-    /// ラベルで指定された分 (再フィルタ用)
+    /// The portion specified by label (for re-filtering)
     labels: Vec<String>,
-    /// 数値で直接指定された分 (再フィルタでラベル不一致でも残す)
+    /// The portion specified directly by number (kept in re-filtering even if the label differs)
     numeric_values: Vec<i64>,
-    /// ラベル指定した値が他ラベルとも衝突している場合の説明
+    /// Explanation of when a label-specified value also collides with other labels
     collisions: Vec<String>,
 }
 
@@ -378,7 +382,7 @@ impl ResolvedStatuses {
     }
 }
 
-/// 別 workflow が同じ数値に別ラベルを当てている箇所を列挙する。
+/// Enumerate places where another workflow assigns a different label to the same value.
 fn status_value_collisions(workflows: &[Workflow], label: &str, value: i64) -> Vec<String> {
     let mut out = Vec::new();
     for flow in workflows {
@@ -394,9 +398,9 @@ fn status_value_collisions(workflows: &[Workflow], label: &str, value: i64) -> V
     out
 }
 
-/// 一覧フィルタ用の status 解決 (複数指定対応)。ラベルが 1 つでも含まれる時だけ
-/// workflow を 1 回取得し、全ラベルをそれで解決する (指定数だけ API を叩かない)。
-/// 重複は畳む。
+/// Resolve statuses for list filtering (supports multiple values). Only when at
+/// least one label is present is the workflow fetched once, and all labels are
+/// resolved with it (does not hit the API once per value). Duplicates are folded.
 fn resolve_list_statuses(api: &Api, project: &str, inputs: &[String]) -> Result<ResolvedStatuses> {
     if inputs.is_empty() {
         return Ok(ResolvedStatuses::default());
@@ -442,8 +446,9 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
     } else {
         None
     };
-    // status / assignee はサーバー側フィルタに解決して渡す
-    // (--status と --exclude-status は clap で排他なので workflow 取得は最大 1 回)
+    // Resolve status / assignee into server-side filters and pass them through
+    // (--status and --exclude-status are mutually exclusive in clap, so the
+    //  workflow is fetched at most once)
     let status = resolve_list_statuses(api, project, &filter.status)?;
     let exclude_status = resolve_list_statuses(api, project, &filter.exclude_status)?;
     let exclude_phase = resolve_phases(&filter.exclude_phase)?;
@@ -461,8 +466,9 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         || assignee_id.is_some()
         || mentioned_user_id.is_some()
         || filter.bot_ready.is_some();
-    // exclude はサーバー側で数値として落ちるため、同じ数値の別ラベル分も
-    // 巻き込まれる。クライアントでは戻せない (既に応答に無い) ので警告に留める
+    // exclude drops by numeric value on the server, so tasks with a different
+    // label sharing that value are swept in too. The client cannot restore them
+    // (already absent from the response), so we only warn.
     if !exclude_status.collisions.is_empty() {
         eprintln!(
             "warning: --exclude-status also removed tasks whose label differs but \
@@ -487,18 +493,19 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
             bot_ready: filter.bot_ready,
         },
     )?;
-    // --json でも API の生フィールドを保つため Value のまま扱う
+    // Keep raw API fields for --json, so handle it as Value
     let mut items: Vec<Value> = from_value(value)?;
-    // limit 件ちょうど返ってきた場合、それより古い一致タスクが切れている可能性がある
+    // If exactly `limit` items came back, older matching tasks may have been cut off
     if items.len() as u32 >= limit {
         eprintln!(
             "warning: result may be truncated to the newest {limit} tasks; \
              raise --limit (max 500) if you need more"
         );
     }
-    // ラベル指定時はラベル完全一致で再フィルタする。サーバーは数値でしか絞れず、
-    // 別 workflow が同じ数値に別ラベルを使っているとその分が混入するため。
-    // 数値で直接指定された分はラベルを問わず残す (ラベルと数値の混在指定に対応)
+    // When labels are given, re-filter by exact label match: the server can only
+    // filter by number, so if another workflow uses the same value with a
+    // different label, those tasks get mixed in. The portion specified directly by
+    // number is kept regardless of label (supports mixing labels and numbers).
     if !status.labels.is_empty() {
         items.retain(|t| {
             t["status_label"]
@@ -679,10 +686,10 @@ pub fn create(api: &Api, args: &CreateArgs, json: bool) -> Result<()> {
         }
     }
     let mut value = api.create_task_full(&args.project, &Value::Object(body))?;
-    // 作成 API は init_lifecycle が status を初期ステージへリセットするため、
-    // --status 指定は作成後の PATCH で反映する。
-    // PATCH が失敗しても作成自体は成功しているので、エラーで落とさず警告に留める
-    // (エラー終了するとリトライで重複タスクが作られる)。
+    // The create API's init_lifecycle resets status to the initial stage, so a
+    // --status value is applied via a PATCH after creation.
+    // Even if the PATCH fails, creation itself succeeded, so we do not error out
+    // and only warn (erroring would create a duplicate task on retry).
     if let Some(status) = &args.status {
         let task: Task = from_value(value.clone())?;
         let follow_up = task_workflow_stages(api, &args.project, &task.workflow.id)
@@ -733,7 +740,7 @@ pub fn update(
         let status_value = if let Ok(v) = status.trim().parse::<i64>() {
             v
         } else {
-            // ラベル解決はタスクの workflow のステージ集合で行う
+            // Resolve the label against the stage set of the task's workflow
             let task: Task = from_value(api.task_detail(&project, &task_ref)?)?;
             let stages = task_workflow_stages(api, &project, &task.workflow.id)?;
             stages::resolve_status(status, &stages)?
@@ -767,7 +774,7 @@ pub fn update(
     if let Some(due_date) = &args.due_date {
         body.insert("due_date".to_string(), json!(due_date));
     }
-    // ISO8601 datetime。空文字はサーバー側 _parse_datetime が None (クリア) に解釈する。
+    // ISO8601 datetime. An empty string is interpreted as None (clear) by the server's _parse_datetime.
     if let Some(started_at) = &args.started_at {
         body.insert("started_at".to_string(), json!(started_at));
     }
@@ -780,7 +787,7 @@ pub fn update(
     if let Some(bot_ready) = args.bot_ready {
         body.insert("bot_ready".to_string(), json!(bot_ready));
     }
-    // 空文字は null (カテゴリーのクリア) として送る。
+    // An empty string is sent as null (clears the category).
     if let Some(category) = &args.category {
         body.insert(
             "category_id".to_string(),
@@ -809,8 +816,8 @@ pub fn claim(
     let task: Task = from_value(api.task_detail(&project, &task_ref)?)?;
     let stages = task_workflow_stages(api, &project, &task.workflow.id)?;
     let status = stages::claim_stage(&stages, status_override)?;
-    // atomic claim エンドポイント経由。if_unassigned なら他ユーザー assign 済みは
-    // サーバーが 409 を返す (自律エージェントのレース回避)。
+    // Via the atomic claim endpoint. With if_unassigned, if the task is already
+    // assigned to another user the server returns 409 (avoids autonomous-agent races).
     let value = api.claim_task(&project, &task_ref, status, if_unassigned)?;
     if json {
         return print_json(&value);
@@ -829,9 +836,10 @@ pub fn complete(
     let task: Task = from_value(api.task_detail(&project, &task_ref)?)?;
     let stages = task_workflow_stages(api, &project, &task.workflow.id)?;
     let terminal = stages::terminal_stage(&stages)?;
-    // 先に status PATCH、成功したらコメント (PATCH 失敗時に完了コメントだけ残るのを防ぐ)。
-    // コメント投稿の失敗は警告に留める (完了自体は成功しており、エラー終了すると
-    // リトライで二重完了操作になる)。
+    // PATCH the status first, then comment on success (prevents leaving only a
+    // completion comment when the PATCH fails). A failed comment post is only
+    // warned (completion itself succeeded; erroring out would double the
+    // completion operation on retry).
     let value = api.patch_task(&project, &task_ref, &json!({ "status": terminal.value }))?;
     if let Some(comment) = comment {
         if let Err(error) = api.post_comment(&project, &task_ref, comment) {
@@ -841,7 +849,7 @@ pub fn complete(
     if json {
         return print_json(&value);
     }
-    // 終端ステージへの変更で acceptance flow があれば phase=acceptance (検収) になる
+    // Changing to the terminal stage moves phase=acceptance (検収) if an acceptance flow exists
     print_task_line(&value, "completed")
 }
 
@@ -887,7 +895,7 @@ pub fn events(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
         for line in event.content.lines() {
             println!("  {line}");
         }
-        // field_change 等は content が空で metadata.changes に diff が入る
+        // For events like field_change, content is empty and the diff is in metadata.changes
         if let Some(changes) = event.metadata.get("changes").and_then(|c| c.as_array()) {
             for change in changes {
                 println!(
@@ -1037,7 +1045,7 @@ mod tests {
     #[test]
     fn unknown_label_is_an_error() {
         let flows = workflows(&[("default", &[(10, "起案")])]);
-        assert!(resolve_list_status_label(&flows, "なにこれ").is_err());
+        assert!(resolve_list_status_label(&flows, "no-such-label").is_err());
     }
 
     #[test]
@@ -1052,7 +1060,7 @@ mod tests {
 
     #[test]
     fn detects_same_value_used_by_a_different_label() {
-        // 別 workflow が 40 に別ラベルを当てている: exclude では巻き込みが起きる
+        // Another workflow assigns a different label to 40: exclude sweeps them in
         let flows = workflows(&[
             ("default", &[(40, "対応中")]),
             ("review", &[(40, "レビュー中")]),
@@ -1082,7 +1090,7 @@ mod tests {
 
     #[test]
     fn unknown_phase_is_an_error() {
-        // 起案 は status であって phase ではない
+        // 起案 is a status, not a phase
         assert!(resolve_phase("起案").is_err());
         assert!(resolve_phase("bogus").is_err());
         assert!(resolve_phase("").is_err());
@@ -1090,7 +1098,7 @@ mod tests {
 
     #[test]
     fn resolve_phases_dedupes_across_label_and_value() {
-        // "無効" と "invalid" は同じ value に畳まれる
+        // "無効" and "invalid" fold into the same value
         let out = resolve_phases(&["完了".into(), "無効".into(), "invalid".into()]).unwrap();
         assert_eq!(out, vec!["done".to_string(), "invalid".to_string()]);
     }

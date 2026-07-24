@@ -1,6 +1,6 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// CJK 幅を考慮した簡易テーブル出力。
+/// Simple table output that accounts for CJK character width.
 pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut widths: Vec<usize> = headers.iter().map(|h| h.width()).collect();
     for row in rows {
@@ -34,7 +34,7 @@ fn print_row(cells: &[String], widths: &[usize]) {
     println!("{}", line.trim_end());
 }
 
-/// 表示幅で切り詰める (超過時は末尾に …)。
+/// Truncate to a display width (appends … when it overflows).
 pub fn truncate_width(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_string();
@@ -61,7 +61,7 @@ mod tests {
     fn truncate_width_handles_cjk() {
         assert_eq!(truncate_width("hello", 10), "hello");
         assert_eq!(truncate_width("abcdef", 4), "abc…");
-        // 全角は幅 2: 幅 5 なら 2 文字 (幅 4) + … で収まる
+        // Full-width chars are width 2: at width 5, 2 chars (width 4) + … fits
         assert_eq!(truncate_width("日本語のタイトル", 5), "日本…");
     }
 }

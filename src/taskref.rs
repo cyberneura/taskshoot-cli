@@ -3,9 +3,9 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskRef {
-    /// `KEY-番号` (tracked タスク)。API へは番号を渡す。
+    /// `KEY-<number>` (a tracked task). The number is sent to the API.
     Slug { project_key: String, number: u64 },
-    /// UUID (untracked は number を持たないため UUID でのみ参照できる)。
+    /// UUID (untracked tasks have no number, so they can only be referenced by UUID).
     Uuid(String),
 }
 
@@ -18,9 +18,10 @@ impl TaskRef {
     }
 }
 
-/// `DEV-12` → Slug / UUID 文字列 → Uuid。
-/// タスク番号にハイフンは含まれないため、末尾の `-数字` で一意に分解できる
-/// (フロントの canonical URL 規約と同じルール。プロジェクトキーにハイフンがあっても曖昧にならない)。
+/// `DEV-12` → Slug / a UUID string → Uuid.
+/// Task numbers never contain a hyphen, so the trailing `-<digits>` splits
+/// unambiguously (the same rule as the frontend's canonical URL convention;
+/// a project key containing a hyphen stays unambiguous).
 pub fn parse_task_ref(input: &str) -> Result<TaskRef> {
     let input = input.trim();
     if Uuid::parse_str(input).is_ok() {

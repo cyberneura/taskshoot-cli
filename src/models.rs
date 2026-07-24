@@ -70,7 +70,7 @@ pub struct Task {
     #[serde(default)]
     pub due_date: Option<String>,
     pub tracked: bool,
-    /// Bot (AI エージェント) が着手してよいか。
+    /// Whether a bot (AI agent) is allowed to start working on this task.
     #[serde(default)]
     pub bot_ready: bool,
     #[serde(default)]
@@ -81,7 +81,7 @@ pub struct Task {
 }
 
 impl Task {
-    /// 表示用 ID。tracked なら `KEY-番号`、untracked は UUID。
+    /// Display ID: `KEY-<number>` when tracked, otherwise the UUID.
     pub fn display_ref(&self) -> String {
         match self.number {
             Some(number) => format!("{}-{}", self.project_key, number),
@@ -101,7 +101,7 @@ pub struct SearchResult {
 }
 
 impl SearchResult {
-    /// 表示用 ID。tracked なら `KEY-番号`、untracked は UUID。
+    /// Display ID: `KEY-<number>` when tracked, otherwise the UUID.
     pub fn display_ref(&self) -> String {
         match self.number {
             Some(number) => format!("{}-{}", self.project_key, number),
@@ -153,7 +153,7 @@ pub struct TaskEvent {
     pub author: Option<TaskAuthor>,
     #[serde(default)]
     pub content: String,
-    /// field_change 等は content が空で、変更内容は metadata.changes に入る
+    /// For events like field_change, content is empty and the change is in metadata.changes
     #[serde(default)]
     pub metadata: serde_json::Value,
     #[serde(default)]
@@ -197,7 +197,7 @@ pub struct Notification {
 }
 
 impl Notification {
-    /// 関連タスクの表示 ref (`KEY-N`。untracked / タスク無しは "-")。
+    /// Display ref of the related task (`KEY-N`; "-" when untracked or absent).
     pub fn task_ref(&self) -> String {
         match &self.task {
             Some(task) => match task.number {

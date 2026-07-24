@@ -1,8 +1,16 @@
 [package]
-name = "taskshoot-cli"
+name = "taskshoot"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
 description = "Taskshoot task operations CLI (AI-agent friendly)"
+authors = ["Yotsuyanagi <t@ytyng.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cyberneura/taskshoot-cli"
+homepage = "https://taskshoot.com"
+readme = "README.md"
+keywords = ["taskshoot", "cli", "task", "productivity"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "taskshoot"

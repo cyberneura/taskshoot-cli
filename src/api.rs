@@ -19,15 +19,15 @@ fn enc(segment: &str) -> String {
     utf8_percent_encode(segment, PATH_ENCODE).to_string()
 }
 
-/// tasks 一覧のサーバー側フィルタ (None のものはクエリに載せない)。
+/// Server-side filters for the tasks list (None values are omitted from the query).
 pub struct TasksQuery {
     pub tracked: Option<bool>,
     pub limit: u32,
-    /// 複数指定は OR。空なら status フィルタ無し
+    /// Multiple values are OR'd. Empty means no status filter.
     pub status: Vec<i64>,
-    /// 除外する status。空なら除外無し
+    /// Statuses to exclude. Empty means no exclusion.
     pub exclude_status: Vec<i64>,
-    /// 除外する phase (英字 value)。空なら除外無し
+    /// Phases to exclude (english value). Empty means no exclusion.
     pub exclude_phase: Vec<String>,
     pub assignee_id: Option<String>,
     pub mentioned_user_id: Option<String>,
@@ -59,7 +59,7 @@ impl Api {
         self.org.as_deref()
     }
 
-    /// org スコープのエンドポイントで必須。me / orgs は org 無しでも使える。
+    /// Required for org-scoped endpoints. me / orgs work without an org.
     fn org(&self) -> Result<&str> {
         self.org
             .as_deref()
@@ -129,7 +129,7 @@ impl Api {
         if let Some(tracked) = query.tracked {
             path.push_str(&format!("&tracked={tracked}"));
         }
-        // 複数値は繰り返しクエリパラメータで送る (?status=10&status=40)
+        // Multiple values are sent as repeated query parameters (?status=10&status=40)
         for status in &query.status {
             path.push_str(&format!("&status={status}"));
         }
@@ -174,8 +174,8 @@ impl Api {
         self.patch(&self.task_path(project, task_ref, "")?, body)
     }
 
-    /// タスクを自分に claim する。if_unassigned=true なら他ユーザー assign 済みは
-    /// 409 (send が "API error 409: ..." で bail) になる。
+    /// Claim a task for yourself. With if_unassigned=true, a task already
+    /// assigned to another user returns 409 (send bails with "API error 409: ...").
     pub fn claim_task(
         &self,
         project: &str,
@@ -244,7 +244,7 @@ impl Api {
         self.get(&self.project_path(project, "assignable-users/")?)
     }
 
-    /// 自分宛の通知一覧 (org 非依存の user スコープ)。
+    /// List notifications addressed to you (user-scoped, org-independent).
     pub fn notifications(&self, limit: u32, unread_only: bool) -> Result<Value> {
         let mut path = format!("/api/user/notifications?limit={limit}");
         if unread_only {
@@ -253,8 +253,8 @@ impl Api {
         self.get(&path)
     }
 
-    /// 通知を既読にする (ids 指定 or all=true)。更新後の未読数を返す。
-    /// mark-read は書き込みなので write 権限キーが必要。
+    /// Mark notifications as read (by ids, or all=true). Returns the updated unread count.
+    /// mark-read is a write, so it requires a write-scoped API key.
     pub fn mark_notifications_read(&self, ids: &[String], all: bool) -> Result<Value> {
         self.post(
             "/api/user/notifications/mark-read",
@@ -271,8 +271,8 @@ fn truncate(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
-/// エラーボディの `{"detail": "..."}` (400/403/404) と
-/// pydantic 形式 `{"detail": [...]}` (422) の両方から要点を取り出す。
+/// Extract the gist from both `{"detail": "..."}` error bodies (400/403/404)
+/// and the pydantic-style `{"detail": [...]}` form (422).
 fn extract_detail(body: &str) -> String {
     match serde_json::from_str::<Value>(body) {
         Ok(value) => match value.get("detail") {

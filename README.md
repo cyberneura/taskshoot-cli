@@ -1,206 +1,243 @@
-# taskshoot-cli
+# taskshoot
 
-Taskshoot のタスク操作 CLI (Rust)。AI エージェントが「未着手タスクを拾う → 着手 →
-開発 → 完了」の定型フローを回すことを主目的に、Web でできる管理系以外のタスク操作を
-コマンドラインから行える。
+Command-line client for [Taskshoot](https://taskshoot.com) — task management with a
+Slack-like chat UI.
 
-## ビルド / インストール
+`taskshoot` lets you drive the task operations you would otherwise do in the web UI
+(list, search, claim, comment, complete, …) from your terminal. It is designed to be
+friendly to **both humans and AI agents**: every command supports `--json` output and
+returns exit code `0` on success / `1` on error, so it composes cleanly in scripts and
+autonomous agent loops.
+
+> Taskshoot itself is closed-source; this CLI is an open-source API client and contains
+> no server-side logic.
+
+## Installation
+
+### Homebrew (macOS / Linux)
 
 ```bash
-cd client-cli
-cargo build --release
-# バイナリ: target/release/taskshoot
-cargo install --path .   # ~/.cargo/bin/taskshoot に入れる場合
+brew install cyberneura/tap/taskshoot
 ```
 
-## 認証設定
+### Shell script (macOS / Linux)
 
-API キー (`tssk-...`) は taskshoot の `/settings/api-keys` (user キー)、または
-組織管理の Bot users からボットに発行する。write 操作には write 権限付きキーが必要。
-組織スコープキー (deprecated) は使えない。
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/cyberneura/taskshoot-cli/releases/latest/download/taskshoot-installer.sh | sh
+```
 
-読み込み優先順位:
+### PowerShell (Windows)
 
-1. **環境変数直接** — `TASKSHOOT_API_KEY` / `TASKSHOOT_CLI_ORGANIZATION`。
-   CI や AI エージェントが直接渡すケース。1Password の Touch ID 承認が使えない
-   プロセスではこの経路を使う。
-2. **getter command** — `TASKSHOOT_CLI_ENV_GETTER_COMMAND` に設定されたコマンドを
-   (シェルを介さず) 実行し、stdout を env-file 形式 (`KEY=VALUE`、`#` コメント可)
-   としてパースする。
-3. **`.loadenv.sh` 探索** — カレントディレクトリから上位へ、次に実行ファイルの
-   ディレクトリから上位へ `.loadenv.sh` を探し、`export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...`
-   の行だけを抽出して 2 と同様に実行する (ファイル全体をシェル実行はしない)。
-   **発見したファイルは direnv の allow と同様に、`taskshoot trust <path>` で明示的に
-   信頼したものだけ実行される** (信頼情報は `~/.config/taskshoot/trusted-loadenv` に
-   内容のハッシュ付きで記録され、ファイルが変更されると再信頼が必要)。悪意ある
-   リポジトリ配下で CLI を実行しても任意コマンドが走らないようにするための仕組み。
+```powershell
+powershell -c "irm https://github.com/cyberneura/taskshoot-cli/releases/latest/download/taskshoot-installer.ps1 | iex"
+```
 
-> **`taskshoot trust` が必要なのは経路 3 だけ**。以下の構成 (シェルプロファイルや
-> ラッパースクリプト経由の export を含む) では `.loadenv.sh` の探索自体が走らないため、
-> `.loadenv.sh` も trust も不要 (`~/.config/taskshoot/trusted-loadenv` が存在しなくてよい)。
-> この構成で `taskshoot trust` を引数無しで実行すると「trust は不要」と表示して正常終了する。
+### Cargo
+
+```bash
+cargo install taskshoot
+```
+
+### From source
+
+```bash
+git clone https://github.com/cyberneura/taskshoot-cli
+cd taskshoot-cli
+cargo install --path .   # installs to ~/.cargo/bin/taskshoot
+```
+
+Prebuilt binaries for macOS (Apple Silicon / Intel), Linux (x86_64 / aarch64) and
+Windows (x86_64) are attached to every [GitHub release](https://github.com/cyberneura/taskshoot-cli/releases).
+
+## Authentication
+
+An API key (`tssk-...`) is issued from Taskshoot under `/settings/api-keys` (a personal
+key), or from a Bot user in organization management. Write operations require a
+write-scoped key. Organization-scoped keys (deprecated) are not accepted.
+
+The key and organization are resolved in this order of precedence:
+
+1. **Environment variables** — `TASKSHOOT_API_KEY` / `TASKSHOOT_CLI_ORGANIZATION`.
+   Use this when CI or an AI agent passes credentials directly, or in any process where
+   1Password Touch ID approval is unavailable.
+2. **Getter command** — the command in `TASKSHOOT_CLI_ENV_GETTER_COMMAND` is executed
+   (without a shell) and its stdout is parsed as an env-file (`KEY=VALUE`, `#` comments
+   allowed).
+3. **`.loadenv.sh` discovery** — `taskshoot` searches upward from the current directory,
+   then upward from the executable's directory, for a `.loadenv.sh`, and extracts only
+   the `export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...` line to run as in (2) (it never
+   executes the whole file as a shell script). **A discovered file is only trusted after
+   you explicitly approve it with `taskshoot trust <path>`** (direnv-style; the approval
+   is recorded with a content hash in `~/.config/taskshoot/trusted-loadenv`, and editing
+   the file requires re-approval). This prevents an untrusted repository from running
+   arbitrary commands when you invoke the CLI inside it.
+
+> **`taskshoot trust` is only needed for path 3.** With the setups below (including
+> exports via a shell profile or wrapper script), `.loadenv.sh` discovery never runs, so
+> neither `.loadenv.sh` nor `trust` is required. Running `taskshoot trust` with no
+> argument in such a setup prints "trust is not needed" and exits successfully.
 >
-> - `TASKSHOOT_CLI_ENV_GETTER_COMMAND` を export している (探索は必ずスキップされる)
-> - `TASKSHOOT_API_KEY` **と** `TASKSHOOT_CLI_ORGANIZATION` の両方を export している
+> - `TASKSHOOT_CLI_ENV_GETTER_COMMAND` is exported (discovery is always skipped).
+> - Both `TASKSHOOT_API_KEY` **and** `TASKSHOOT_CLI_ORGANIZATION` are exported.
 >
-> **`TASKSHOOT_API_KEY` だけでは不十分**な点に注意。org スコープのコマンド
-> (`projects` / `tasks` 等) は `--org` も `TASKSHOOT_CLI_ORGANIZATION` も無いと、
-> **org を解決する目的で `.loadenv.sh` を探索する** (`resolve()` の
-> `need_org && org_unresolved` 分岐)。この場合は未 trust の候補がスキップされ
-> `TASKSHOOT_CLI_ORGANIZATION is not set` で失敗するため、trust (または org の指定) が要る。
-> `me` / `orgs` (org 不要) はキーだけで動く。
+> Note that `TASKSHOOT_API_KEY` **alone is not enough**: org-scoped commands
+> (`projects` / `tasks` / …) that receive neither `--org` nor `TASKSHOOT_CLI_ORGANIZATION`
+> will **search for a `.loadenv.sh` in order to resolve the organization**. In that case
+> an untrusted candidate is skipped and the command fails with
+> `TASKSHOOT_CLI_ORGANIZATION is not set`, so trust (or an explicit org) is required.
+> `me` / `orgs` (which need no org) work with the key alone.
 
-### 1Password でのセットアップ例
+### 1Password setup example
 
-1Password の development vault に item を作り、env-file 形式のフィールドを入れる:
+Create an item in your 1Password vault with an env-file-formatted field:
 
 ```
 TASKSHOOT_CLI_ORGANIZATION=cyberneura
 TASKSHOOT_API_KEY=tssk-...
 ```
 
-`.loadenv.sh` (グローバル gitignore 済み) を**探索されるディレクトリ**に作り、信頼登録する。
-探索は「カレントの祖先」と「実行ファイルの祖先」のみで、**子ディレクトリは見ない**点に注意:
+Put a `.loadenv.sh` in a **directory that will be searched** and register trust.
+Discovery only looks at ancestors of the current directory and ancestors of the
+executable — **it never looks into child directories**:
 
-- **リポジトリ内で使う場合**: リポジトリルートに置く (リポジトリ内のどこから実行しても
-  祖先として発見される)。`client-cli/` に置いた場合は `client-cli/` 配下で実行した時だけ見つかる。
-- **`cargo install` したバイナリをどこからでも使う場合**: `~/.loadenv.sh` に置く
-  (`$HOME` は `~/.cargo/bin` の祖先なので実行ファイル側の探索で見つかる)。
-  またはシェルプロファイルで `TASKSHOOT_CLI_ENV_GETTER_COMMAND` を export する (探索不要)。
+- **Using it inside a repository**: place it at the repository root (found from anywhere
+  inside the repo).
+- **Using a `cargo install`ed binary from anywhere**: place it at `~/.loadenv.sh`
+  (`$HOME` is an ancestor of `~/.cargo/bin`, so it is found via the executable-side
+  search), or export `TASKSHOOT_CLI_ENV_GETTER_COMMAND` from your shell profile
+  (no discovery needed).
 
 ```sh
-echo 'export TASKSHOOT_CLI_ENV_GETTER_COMMAND='"'"'op read "op://development/taskshoot/taskshoot-cli"'"'"' > .loadenv.sh   # リポジトリルート
-taskshoot trust .loadenv.sh   # 1回だけ。ファイルを書き換えたら再実行
+echo 'export TASKSHOOT_CLI_ENV_GETTER_COMMAND='"'"'op read "op://development/taskshoot/taskshoot-cli"'"'"' > .loadenv.sh
+taskshoot trust .loadenv.sh   # once; re-run if you edit the file
 ```
 
-### API 接続先
+### API endpoint
 
-デフォルトは `https://taskshoot-api.cyberneura.com`。ローカル開発サーバーに向けるには:
+The default is `https://taskshoot-api.cyberneura.com`. To point at a local dev server:
 
 ```bash
 export TASKSHOOT_API_ORIGIN=http://127.0.0.1:8008
 ```
 
-## 使い方
+## Usage
 
-すべてのコマンドに `--json` (生 JSON 出力) と `--org <code>` (組織上書き) がある。
-exit code は成功 0 / エラー 1。
+Every command supports `--json` (raw JSON output) and `--org <code>` (override the
+organization).
 
 ```bash
-taskshoot me                                   # 認証確認 (誰として動いているか)
-taskshoot orgs                                 # アクセス可能な組織一覧 (org 未設定でも可)
-taskshoot projects                             # プロジェクト一覧
-taskshoot workflows --project DEV              # 進行フローとステージ一覧 (値/ラベル/terminal)
-taskshoot categories --project DEV             # タスクカテゴリー一覧 (id/名前)
+taskshoot me                                   # who am I (verify auth)
+taskshoot orgs                                 # organizations you can access (works with no org set)
+taskshoot projects                             # list projects
+taskshoot workflows --project DEV              # progress flows and stages (value / label / terminal)
+taskshoot categories --project DEV             # task categories (id / name)
 
-taskshoot tasks --project DEV                  # タスク一覧
-taskshoot tasks --project DEV --status 起案 --assignee me
-taskshoot tasks --project DEV --status 起案,対応中          # 複数指定は OR
-taskshoot tasks --project DEV --status 起案 --status 40     # 繰り返し指定でも OR
-taskshoot tasks --project DEV --exclude-status 完了         # status 除外 (--status とは排他)
-taskshoot tasks --project DEV --exclude-phase 完了,無効,却下,中止  # phase 除外 (終端タスクを外す)
-taskshoot tasks --project DEV --mentioned me   # 自分に @ メンションがあるタスク
-taskshoot tasks --project DEV --mentioned suzuki   # 特定の人宛 (handle / 表示名 / id も可)
-taskshoot tasks --project DEV --untracked      # casual タスクのみ
-taskshoot tasks --project DEV --bot-ready true # Bot が着手可のタスクのみ
+taskshoot tasks --project DEV                  # list tasks
+taskshoot tasks --project DEV --status draft --assignee me
+taskshoot tasks --project DEV --status draft,in-progress    # multiple values are OR'd
+taskshoot tasks --project DEV --status draft --status 40    # repeating the flag also ORs
+taskshoot tasks --project DEV --exclude-status done         # exclude a status (mutually exclusive with --status)
+taskshoot tasks --project DEV --exclude-phase done,invalid,rejected,cancelled  # exclude terminal tasks by phase
+taskshoot tasks --project DEV --mentioned me   # tasks that @-mention you
+taskshoot tasks --project DEV --mentioned suzuki   # a specific person (handle / display name / id)
+taskshoot tasks --project DEV --untracked      # casual tasks only
+taskshoot tasks --project DEV --bot-ready true # only tasks a bot may pick up
 
-taskshoot search "検索 インデックス"          # 組織横断のタスク検索 (--limit 1-50)
-taskshoot search DEV-12                        # KEY-番号 の直接参照もヒットする
+taskshoot search "search index"                # org-wide task search (--limit 1-50)
+taskshoot search DEV-12                         # a KEY-number reference matches directly
 
 taskshoot task show DEV-12
-taskshoot task create --project DEV --title "新機能" --description "..." --assignee me
-taskshoot task create --project DEV --content "メモ的な相談"   # untracked (番号なし)
-taskshoot task update DEV-12 --status 対応中 --progress 50
-taskshoot task update DEV-12 --bot-ready true  # Bot 着手可フラグ (変更はログに残る)
-taskshoot task update DEV-12 --category 開発   # カテゴリー設定 (名前 or id。"" でクリア)
-taskshoot task claim DEV-12                    # assignee=me + 対応中へ (--status で上書き可)
-taskshoot task claim DEV-12 --if-unassigned    # 未 assign の時だけ claim (他が取得済みなら 409)
-taskshoot task complete DEV-12 --comment "対応完了しました"     # 終端ステージへ
-taskshoot task comment DEV-12 "進捗コメント" --file ./screenshot.png
-taskshoot task events DEV-12                   # スレッド表示
-taskshoot task track <uuid> --project DEV      # untracked → tracked (番号採番)
-taskshoot task cancel DEV-12 --reason "重複のため"
+taskshoot task create --project DEV --title "New feature" --description "..." --assignee me
+taskshoot task create --project DEV --content "a casual note"   # untracked (no number)
+taskshoot task update DEV-12 --status in-progress --progress 50
+taskshoot task update DEV-12 --bot-ready true  # bot-ready flag (change is logged)
+taskshoot task update DEV-12 --category Dev    # set category (name or id; "" clears it)
+taskshoot task claim DEV-12                     # assignee=me + move to in-progress (--status overrides)
+taskshoot task claim DEV-12 --if-unassigned     # claim only if unassigned (409 if already taken)
+taskshoot task complete DEV-12 --comment "Done"     # move to the terminal stage
+taskshoot task comment DEV-12 "progress update" --file ./screenshot.png
+taskshoot task events DEV-12                     # show the thread
+taskshoot task track <uuid> --project DEV        # untracked -> tracked (assigns a number)
+taskshoot task cancel DEV-12 --reason "duplicate"
 taskshoot task resume DEV-12
 ```
 
-通知 (mention inbox):
+Notifications (mention inbox):
 
 ```bash
-taskshoot notifications list                   # 自分宛の通知一覧 (新しい順) + 未読数
-taskshoot notifications list --unread-only     # 未読のみ
-taskshoot notifications list --limit 50 --json # AI エージェント向け (最大 100)
-taskshoot notifications read <id> [<id> ...]   # 指定 id を既読にする (要 write キー)
-taskshoot notifications read --all             # 全通知を既読にする
+taskshoot notifications list                   # your notifications (newest first) + unread count
+taskshoot notifications list --unread-only     # unread only
+taskshoot notifications list --limit 50 --json # for AI agents (max 100)
+taskshoot notifications read <id> [<id> ...]   # mark ids read (needs a write key)
+taskshoot notifications read --all             # mark all read
 ```
 
-- タスク参照は `KEY-番号` (例 `DEV-12`)。untracked タスクは番号を持たないため
-  UUID + `--project` で指定する。
-- `--status` はラベル (例 `対応中`) か数値 (例 `40`) のどちらでも指定できる。
-  `task update` 等の単一タスク操作ではそのタスクの workflow のステージから解決する。
-  `tasks --status` (一覧フィルタ) はプロジェクトの全 workflow から解決し、同一ラベルが
-  複数の値に解決される場合はエラーになる (数値指定で回避)。
-- `tasks --status` / `tasks --exclude-status` は**複数指定できる** (カンマ区切りでも
-  フラグの繰り返しでも可)。複数値は OR で、`--status` が「いずれかに一致」、
-  `--exclude-status` が「いずれにも一致しない」。両者は排他 (include を指定するなら
-  exclude は不要なため)。サーバー側フィルタなので `limit` で切り詰める前に効く。
-- **`--exclude-status` にラベルを指定する時の注意**: サーバーは status を数値でしか
-  絞れないため、別 workflow が同じ数値に別ラベルを当てていると、そのラベルのタスクも
-  巻き込んで除外される。`--status` (include) はクライアント側でラベル再フィルタして
-  落とせるが、exclude は応答に既に含まれていないので回収できない。この状況を検出した
-  時は stderr に warning を出すので、正確に除きたい場合は workflow ごとの数値を
-  `taskshoot workflows --project <KEY>` で確認して数値指定する。
-- **`status` (ステージ) と `phase` (ライフサイクル) は別軸**。status は
-  起案 → … → 完了 のステージで、`--status` / `--exclude-status` はこれを絞る。
-  一方 `完了` `無効` `却下` `中止` は **phase** であって status ではない。特に「無効」は
-  phase=invalid にするだけで status を変えない (起案のまま無効になりうる) ので、
-  `--exclude-status` では終端タスクを漏れなく除外できない。**完了・無効等の終端を
-  外したい時は `--exclude-phase` を使う** (例: `--exclude-phase 完了,無効,却下,中止`)。
-  値はラベル (完了/無効/却下/中止/進行中/検収/着手前承認) か英字
-  (done/invalid/rejected/cancelled/in_progress/acceptance/pre_approval)。JSON の
-  `phase` フィールドは英字 value で返る。
-- `task complete` は workflow の terminal ステージへ変更する。プロジェクトの
-  workflow に検収フローがある場合、タスクは完了ではなく検収フェーズに入る (仕様)。
-  `--comment` は完了成功後にスレッドへ投稿される。
-- `tasks --mentioned <user>` は「そのユーザー宛の @ メンションが description か
-  コメントにあるタスク」に絞り込む (サーバー側フィルタ `mentioned_user_id`)。
-  ユーザーは `--assignee` と同じく "me" / handle name / 表示名 / user id で指定できる。
-  照合はフロントエンドのメンション表示と同じ規則 (handle_name、未設定なら
-  メール local part 由来のデフォルト handle) で、所属する MentionGroup 宛
-  (@dev-team 等) も含む。
-- `task create --status` は作成 API がステータスを初期ステージに戻す仕様のため、
-  作成後に PATCH で反映している (見た目は 1 コマンド)。
-- `--category` (create / update) はカテゴリー名 (大文字小文字無視) か id で指定する。
-  一覧は `taskshoot categories --project <KEY>`。`update --category ""` でクリアできる。
-- `me` / `orgs` / `notifications` は組織未設定 (`TASKSHOOT_CLI_ORGANIZATION` なし)
-  でも実行できる (通知はユーザースコープで組織横断)。
-- `notifications` は自分宛の通知 (メンション / assign / status 変更等) を扱う。
-  ボットには通常 `task_mentioned` (= @bot 宛メンション) のみが届くので、
-  自律ループはこれを拾って着手判断に使える。`read` (既読化) は書き込みなので
-  write 権限キーが必要。既読は通知ごと (per-item) に記録される。
-- `search` は組織内の全プロジェクト横断でタスクを検索する (`/task-search/` API)。
-  サーバー側は bigram (部分一致) + ベクトル (意味検索) のハイブリッド。タイトル /
-  description / コメント本文が対象で、`KEY-番号` や番号のみの入力は直接ヒットする。
+## Command notes
 
-### AI エージェントの定型フロー例
+- Task references are `KEY-number` (e.g. `DEV-12`). Untracked tasks have no number, so
+  reference them by UUID + `--project`.
+- `--status` accepts a label (e.g. `in-progress`) or a numeric value (e.g. `40`). For
+  single-task operations (`task update`, …) it is resolved against that task's workflow.
+  For `tasks --status` (the list filter) it is resolved against all of the project's
+  workflows, and if one label maps to more than one value it errors (use a numeric value).
+- `tasks --status` / `tasks --exclude-status` **accept multiple values** (comma-separated
+  or by repeating the flag). Multiple values are OR'd: `--status` means "matches any",
+  `--exclude-status` means "matches none". The two are mutually exclusive. Both are
+  server-side filters, so they apply *before* the `limit` truncation (more accurate than
+  filtering with `jq`).
+- **Caveat when passing a label to `--exclude-status`**: the server can only filter status
+  by its numeric value, so if another workflow assigns a different label to the same value,
+  tasks with that label are excluded too. The `--status` (include) path can correct this
+  client-side by re-filtering the response by label text, but exclude cannot (the rows are
+  already gone from the response). When this is detected a warning is printed to stderr;
+  to exclude precisely, look up the per-workflow numeric value with
+  `taskshoot workflows --project <KEY>` and pass the number.
+- **`status` (stage) and `phase` (lifecycle) are independent axes.** `status` is the
+  stage (draft → … → done); `--status` / `--exclude-status` filter on it. `done`,
+  `invalid`, `rejected`, `cancelled` are **phases**, not statuses. In particular
+  "invalid" only sets `phase=invalid` and leaves the status unchanged (a task can be
+  invalid while still in the "draft" stage), so `--exclude-status` cannot reliably remove
+  terminal tasks. **To drop terminal tasks (done / invalid / …), use `--exclude-phase`**
+  (e.g. `--exclude-phase done,invalid,rejected,cancelled`). Values may be a label
+  (Japanese) or the english value
+  (`done` / `invalid` / `rejected` / `cancelled` / `in_progress` / `acceptance` /
+  `pre_approval`). The JSON `phase` field is returned as the english value.
+- `task complete` moves to the workflow's terminal stage. If the project's workflow has an
+  acceptance flow, the task enters the acceptance phase rather than being completed (by
+  design). `--comment` is posted to the thread after completion succeeds.
+- `tasks --mentioned <user>` narrows to "tasks whose description or a comment @-mentions
+  that user" (server-side filter `mentioned_user_id`). The user is given as `me` / handle
+  name / display name / user id, same as `--assignee`. Matching follows the same rules as
+  the web UI's mention rendering (handle_name, or a default handle derived from the email
+  local part), and includes mentions of MentionGroups the user belongs to (`@dev-team`, …).
+- `--category` (create / update) takes a category name (case-insensitive) or id. List them
+  with `taskshoot categories --project <KEY>`. `update --category ""` clears it.
+- `me` / `orgs` / `notifications` work with no organization set
+  (`TASKSHOOT_CLI_ORGANIZATION` unset); notifications are user-scoped and cross-org.
+- `search` searches across all projects in the organization (`/task-search/` API). The
+  server side is a hybrid of bigram (substring) + vector (semantic) search over title,
+  description and comment bodies; a `KEY-number` or bare number matches directly.
+
+### Example AI-agent flow
 
 ```bash
-taskshoot tasks --project DEV --bot-ready true --status 起案 --json  # 着手可の未着手を探す
-taskshoot task claim DEV-12 --if-unassigned --json     # 拾う (二重処理防止: 他が取得済みなら 409)
-taskshoot task comment DEV-12 "着手します" --json
-# ... 開発 ...
-taskshoot task complete DEV-12 --comment "実装完了。PR: <URL>" --json
+taskshoot tasks --project DEV --bot-ready true --status draft --json  # find pickable, unstarted tasks
+taskshoot task claim DEV-12 --if-unassigned --json     # claim it (avoids double-processing: 409 if taken)
+taskshoot task comment DEV-12 "Starting now" --json
+# ... development ...
+taskshoot task complete DEV-12 --comment "Done. PR: <URL>" --json
 ```
 
-複数エージェントで自律的に回す運用は `taskshoot-agent-loop` スキル参照。
-
-## 開発
+## Development
 
 ```bash
-cargo test          # ユニットテスト (task_ref 分解 / env パース / ステージ解決)
-cargo clippy
+cargo test          # unit tests (task_ref parsing / env parsing / stage resolution)
+cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
 
-API の実体は `backend/taskshoot/task/api.py` ほか django-ninja のルーター定義が正。
-エンドポイントを足す時は `src/api.rs` に薄いメソッドを追加し、コマンドは
-`src/commands.rs` に置く。
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.

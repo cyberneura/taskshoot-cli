@@ -11,25 +11,27 @@ use wait_timeout::ChildExt;
 
 pub const DEFAULT_API_ORIGIN: &str = "https://taskshoot-api.cyberneura.com";
 const GETTER_ENV: &str = "TASKSHOOT_CLI_ENV_GETTER_COMMAND";
-// op read は初回の生体認証で時間がかかることがある
+// `op read` can be slow on the first biometric authentication
 const GETTER_TIMEOUT: Duration = Duration::from_secs(120);
 
-// Debug は derive しない (api_key を含むため、将来の debug 出力で漏れるのを防ぐ)
+// Do not derive Debug (it holds api_key; prevents leaking it in future debug output)
 #[derive(Clone)]
 pub struct Config {
     pub api_origin: String,
-    /// org 不要なコマンド (me / orgs) もあるため、必須チェックは使用時に行う。
+    /// Some commands (me / orgs) do not need an org, so the required check is done at use time.
     pub organization: Option<String>,
     pub api_key: String,
 }
 
-/// 解決順:
-/// 1. env 直接 (TASKSHOOT_API_KEY / TASKSHOOT_CLI_ORGANIZATION) — CI やエージェントが渡すケース
-/// 2. env TASKSHOOT_CLI_ENV_GETTER_COMMAND をシェルなしで実行し env-file 形式の stdout を取り込む
-/// 3. .loadenv.sh (カレント→上位→実行ファイル位置) から getter コマンド行だけ抽出して 2 へ
+/// Resolution order:
+/// 1. Direct env (TASKSHOOT_API_KEY / TASKSHOOT_CLI_ORGANIZATION) — the CI/agent case
+/// 2. Run env TASKSHOOT_CLI_ENV_GETTER_COMMAND without a shell and take its
+///    env-file-formatted stdout
+/// 3. Extract just the getter command line from a .loadenv.sh (current dir →
+///    ancestors → executable location) and fall through to 2
 ///
-/// `need_org=false` のコマンド (me / orgs) は、キーが揃っていれば org 目当てで
-/// getter (op read = 認証が走りうる) を起動しない。
+/// Commands with `need_org=false` (me / orgs) do not launch the getter
+/// (`op read` = auth may run) just to obtain an org when the key is already available.
 pub fn resolve(org_override: Option<String>, need_org: bool) -> Result<Config> {
     let env_key = non_empty_env("TASKSHOOT_API_KEY");
     let env_org = non_empty_env("TASKSHOOT_CLI_ORGANIZATION");
@@ -67,9 +69,10 @@ fn non_empty_env(name: &str) -> Option<String> {
     env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// .loadenv.sh の探索対象: CWD の祖先 → 実行ファイルの祖先 (重複除去)。
-/// 実行ファイル側も祖先まで見るのは、target/release や任意の場所から
-/// 実行してもリポジトリ内の設定を見つけられるようにするため。
+/// Search targets for .loadenv.sh: ancestors of the CWD → ancestors of the
+/// executable (deduplicated). The executable side also walks up to its ancestors
+/// so that running from target/release or any location can still find the
+/// configuration inside the repository.
 fn candidate_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(cwd) = env::current_dir() {
@@ -89,7 +92,7 @@ fn candidate_dirs() -> Vec<PathBuf> {
     seen
 }
 
-/// getter 行を含む最初の .loadenv.sh を探す (実行はしない)。
+/// Find the first .loadenv.sh containing a getter line (does not execute it).
 fn discover_loadenv_candidate() -> Result<Option<PathBuf>> {
     for dir in candidate_dirs() {
         let candidate = dir.join(".loadenv.sh");
@@ -118,8 +121,9 @@ fn find_getter_command() -> Result<Option<String>> {
     let Some(cmd) = extract_getter_line(&content) else {
         return Ok(None);
     };
-    // 発見した getter コマンドは direnv の allow と同様、明示的に信頼された
-    // ファイルのみ実行する (悪意あるリポジトリ配下での任意コマンド実行を防ぐ)。
+    // Like direnv's allow, a discovered getter command is only executed from an
+    // explicitly trusted file (prevents arbitrary command execution under a
+    // malicious repository).
     if !is_trusted(&candidate, &content) {
         eprintln!(
             "taskshoot: found {} but it is not trusted; run `taskshoot trust {}` \
@@ -149,8 +153,8 @@ fn sha256_hex(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// trust ファイルの行形式: `<sha256> <絶対パス>`。
-/// ファイル内容が変わるとハッシュ不一致で再信頼が必要になる。
+/// Line format of the trust file: `<sha256> <absolute path>`.
+/// If the file contents change, the hash mismatch requires re-trusting.
 fn is_trusted_entry(trust_content: &str, path: &Path, sha: &str) -> bool {
     trust_content.lines().any(|line| {
         line.trim()
@@ -169,36 +173,39 @@ fn is_trusted(path: &Path, content: &str) -> bool {
     is_trusted_entry(&trust_content, path, &sha256_hex(content))
 }
 
-/// trust が不要と**断言できる** env 構成なら、その根拠となる変数名を返す。
-/// trust は「.loadenv.sh 探索経路」(解決順 3) 専用の仕組みなので、探索が
-/// 走らないと確定する構成でだけ「不要」と言ってよい。
+/// If the env setup lets us **assert** that trust is unnecessary, return the
+/// variable name that justifies it. Trust is a mechanism specific to the
+/// ".loadenv.sh search path" (resolution order 3), so it is only safe to say
+/// "unnecessary" for setups where the search is guaranteed not to run.
 fn external_auth_env() -> Option<&'static str> {
     external_auth_env_with(non_empty_env)
 }
 
-/// env 参照を注入できる形にして、グローバル env を書き換えずにテストする
-/// (テストは並列実行されるため set_var はレースになる)。
+/// Made injectable for env lookups so it can be tested without mutating the
+/// global env (tests run in parallel, so set_var would race).
 fn external_auth_env_with(lookup: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
-    // GETTER_ENV があれば find_getter_command が即 return するため、探索は必ず走らない。
+    // If GETTER_ENV is set, find_getter_command returns immediately, so the search never runs.
     if lookup(GETTER_ENV).is_some() {
         return Some(GETTER_ENV);
     }
-    // キーだけでは不十分: resolve() は `need_org && org_unresolved` の時、org を得る目的で
-    // getter 探索に入る (org スコープのコマンドで .loadenv.sh の trust が要る)。
-    // org も env で解決済みの時だけ探索が走らないと断言できる。
-    // (--org 指定でも走らないが、trust は config 解決前に動くのでここでは env のみ見る。
-    //  誤って「不要」と言うより、判定を絞る側に倒す。)
+    // The key alone is not enough: when `need_org && org_unresolved`, resolve()
+    // enters the getter search to obtain the org (org-scoped commands need the
+    // .loadenv.sh trust). Only when the org is also resolved from env can we
+    // assert the search will not run.
+    // (It also won't run with --org, but trust runs before config resolution, so
+    //  we only look at env here. We err toward narrowing the check rather than
+    //  wrongly claiming "unnecessary".)
     if lookup("TASKSHOOT_API_KEY").is_some() && lookup("TASKSHOOT_CLI_ORGANIZATION").is_some() {
         return Some("TASKSHOOT_API_KEY");
     }
     None
 }
 
-/// bare `taskshoot trust` で候補が 1 つも見つからなかった場合の案内。
-/// env で認証が構成済みなら「trust は不要」であって異常ではないため、
-/// エラーにせず理由を説明して正常終了する。
+/// Guidance for when a bare `taskshoot trust` finds no candidate at all.
+/// If auth is already configured via env, "trust is unnecessary" is not an
+/// error, so we explain why and exit successfully instead of erroring.
 fn report_no_loadenv_candidate() -> Result<()> {
-    // env の「値」は決して出さない (変数名のみ)。認証情報の漏洩を避ける。
+    // Never print env "values" (variable names only). Avoids leaking credentials.
     if let Some(source) = external_auth_env() {
         println!(
             "nothing to trust: no .loadenv.sh was found, and none is needed \
@@ -231,8 +238,9 @@ fn report_no_loadenv_candidate() -> Result<()> {
     )
 }
 
-/// `taskshoot trust [path]`: .loadenv.sh の getter 実行を許可する (direnv allow 相当)。
-/// path 省略時はカレントから探索した最初の候補を対象にする。
+/// `taskshoot trust [path]`: authorize a .loadenv.sh to run its getter
+/// (equivalent to direnv allow). When path is omitted, targets the first
+/// candidate discovered from the current directory.
 pub fn trust_loadenv(path: Option<PathBuf>) -> Result<()> {
     let path = match path {
         Some(path) => path,
@@ -257,7 +265,7 @@ pub fn trust_loadenv(path: Option<PathBuf>) -> Result<()> {
         println!("already trusted: {}", path.display());
         return Ok(());
     }
-    // 同じパスの古いハッシュ行は差し替える
+    // Replace any older hash line for the same path
     let mut lines: Vec<String> = existing
         .lines()
         .filter(|line| {
@@ -275,9 +283,10 @@ pub fn trust_loadenv(path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// .loadenv.sh から `export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...` の行だけ抜き出す。
-/// ファイル全体を shell 実行はしない (任意コード実行を避ける)。
-/// クォートされた値は閉じクォートまで、無クォートは `#` 以降 (行内コメント) を無視する。
+/// Extract only the `export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...` line from a
+/// .loadenv.sh. Does not shell-execute the whole file (avoids arbitrary code
+/// execution). A quoted value is read up to its closing quote; an unquoted value
+/// ignores everything from `#` onward (an inline comment).
 pub fn extract_getter_line(content: &str) -> Option<String> {
     let prefix = format!("{GETTER_ENV}=");
     for line in content.lines() {
@@ -321,11 +330,12 @@ fn spawn_reader<R: Read + Send + 'static>(mut reader: R) -> JoinHandle<String> {
     })
 }
 
-/// getter コマンドをシェルを介さず実行する (shlex 分割 + 直接 spawn)。
-/// シェルメタ文字が解釈されないためコマンドインジェクションの余地が無い。
-/// stdout/stderr は別スレッドで回収する (パイプ詰まりでの wait デッドロック回避)。
-/// 既に env にある API キーは getter 子プロセスへ渡さない (発見した .loadenv.sh の
-/// コマンド経由でキーが読まれるのを防ぐ)。
+/// Run the getter command without going through a shell (shlex split + direct
+/// spawn). Shell metacharacters are not interpreted, so there is no room for
+/// command injection. stdout/stderr are collected on separate threads (avoids a
+/// wait deadlock from a clogged pipe). An API key already in env is not passed to
+/// the getter child process (prevents the key from being read via a discovered
+/// .loadenv.sh's command).
 fn run_getter_command(cmd: &str) -> Result<HashMap<String, String>> {
     let argv =
         shlex::split(cmd).with_context(|| format!("invalid getter command quoting: {cmd}"))?;
@@ -374,7 +384,7 @@ fn run_getter_command(cmd: &str) -> Result<HashMap<String, String>> {
     Ok(vars)
 }
 
-/// env-file 形式 (KEY=VALUE、`#` コメント行、`export ` プレフィックス可) をパースする。
+/// Parse env-file format (KEY=VALUE, `#` comment lines, optional `export ` prefix).
 pub fn parse_env_file(content: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for line in content.lines() {
@@ -439,22 +449,22 @@ mod tests {
             Some("op read \"op://development/taskshoot/cli\"")
         );
         assert_eq!(extract_getter_line("export OTHER=1\n"), None);
-        // export なし・ダブルクォートも許容
+        // The `export` prefix is optional and double quotes are also allowed
         let sh2 = "TASKSHOOT_CLI_ENV_GETTER_COMMAND=\"echo X=1\"\n";
         assert_eq!(extract_getter_line(sh2).as_deref(), Some("echo X=1"));
     }
 
     #[test]
     fn external_auth_env_detects_trust_free_setups() {
-        // env に何も無い = .loadenv.sh 経路が必要 → trust は意味を持つ
+        // Nothing in env = the .loadenv.sh path is needed → trust is meaningful
         assert_eq!(external_auth_env_with(|_| None), None);
-        // getter を外部 (ラッパー / シェルプロファイル) が export 済み → 探索は必ず
-        // スキップされるので trust 不要
+        // The getter is exported externally (a wrapper / shell profile) → the
+        // search is always skipped, so trust is unnecessary
         assert_eq!(
             external_auth_env_with(|name| (name == GETTER_ENV).then(|| "cat env".to_string())),
             Some(GETTER_ENV)
         );
-        // キー + org が揃っていれば探索は走らない → trust 不要
+        // With both the key and org present, the search does not run → trust unnecessary
         assert_eq!(
             external_auth_env_with(|name| matches!(
                 name,
@@ -463,15 +473,15 @@ mod tests {
             .then(|| "set".to_string())),
             Some("TASKSHOOT_API_KEY")
         );
-        // キーのみ・org 未解決は「不要」と断言できない: org スコープのコマンドは
-        // org を得るために .loadenv.sh を探索する (resolve の need_org 分岐)。
+        // Key-only with org unresolved cannot be asserted "unnecessary": org-scoped
+        // commands search .loadenv.sh to obtain the org (resolve's need_org branch).
         assert_eq!(
             external_auth_env_with(
                 |name| (name == "TASKSHOOT_API_KEY").then(|| "tssk-dummy".to_string())
             ),
             None
         );
-        // getter があれば org 未解決でも探索は走らない (GETTER_ENV が優先)
+        // With the getter set, the search does not run even if org is unresolved (GETTER_ENV wins)
         assert_eq!(
             external_auth_env_with(|name| (name == GETTER_ENV).then(|| "cat env".to_string())),
             Some(GETTER_ENV)
@@ -487,13 +497,13 @@ mod tests {
             Path::new("/home/user/proj/.loadenv.sh"),
             &sha
         ));
-        // パス不一致
+        // Path mismatch
         assert!(!is_trusted_entry(
             &trust,
             Path::new("/home/user/other/.loadenv.sh"),
             &sha
         ));
-        // 内容が変わった (ハッシュ不一致) → 信頼しない
+        // Contents changed (hash mismatch) → not trusted
         assert!(!is_trusted_entry(
             &trust,
             Path::new("/home/user/proj/.loadenv.sh"),

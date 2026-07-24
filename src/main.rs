@@ -105,9 +105,10 @@ enum Cmd {
         limit: u32,
     },
     /// Operate on a single task (reference: KEY-N, or UUID with --project)
-    // TaskCmd は Update/Create 等がフィールド多数で飛び抜けて大きい variant なので、
-    // clippy::large_enum_variant を避けるため Box 化して Cmd のサイズ差を抑える
-    // (clap は Box<T: Subcommand> の blanket impl を持つのでそのまま動く)。
+    // TaskCmd is by far the largest variant (Update/Create etc. have many fields),
+    // so it is Boxed to keep Cmd's size difference small and avoid
+    // clippy::large_enum_variant (clap has a blanket impl for Box<T: Subcommand>,
+    // so it works as-is).
     #[command(subcommand)]
     Task(Box<TaskCmd>),
     /// List / mark-read your notifications (bot mention inbox; user-scoped)
@@ -223,7 +224,7 @@ enum TaskCmd {
         /// Repeatable; replaces the whole label list
         #[arg(long = "label")]
         labels: Option<Vec<String>>,
-        /// Bot が着手してよいか (true/false)
+        /// Whether a bot may start working on this task (true/false)
         #[arg(long)]
         bot_ready: Option<bool>,
         /// Category name or id (see `taskshoot categories`). Empty string
@@ -300,17 +301,17 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    // trust は API 設定不要 (config 解決前に処理する)
+    // trust needs no API configuration (handle it before config resolution)
     if let Cmd::Trust { path } = &cli.command {
         return config::trust_loadenv(path.clone());
     }
-    // me / orgs / notifications は org 不要 (通知は user スコープ)
+    // me / orgs / notifications need no org (notifications are user-scoped)
     let need_org = !matches!(cli.command, Cmd::Me | Cmd::Orgs | Cmd::Notifications(_));
     let config = config::resolve(cli.org.clone(), need_org)?;
     let api = api::Api::new(&config)?;
     let json = cli.json;
     match cli.command {
-        // Trust は config 解決前に処理済み
+        // Trust was already handled before config resolution
         Cmd::Trust { .. } => unreachable!("handled before config resolution"),
         Cmd::Me => commands::me(&api, json),
         Cmd::Orgs => commands::orgs(&api, json),

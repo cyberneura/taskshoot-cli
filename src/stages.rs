@@ -2,11 +2,12 @@ use anyhow::{anyhow, bail, Result};
 
 use crate::models::{Stage, Workflow};
 
-/// タスクが従う workflow のステージ集合を解決する。
-/// project workflows API の先頭は id=null の「デフォルト (未割り当て)」合成エントリで、
-/// タスクの workflow.id が null の場合はそれに一致する。
-/// タスクの workflow がプロジェクトから割り当て解除されて一覧に無い場合は、
-/// 別フローのステージで誤解決しないようエラーにする (数値 --status は引き続き使える)。
+/// Resolve the set of stages for the workflow a task follows.
+/// The first entry of the project workflows API is a synthetic "default
+/// (unassigned)" entry with id=null, which matches a task whose workflow.id is null.
+/// If the task's workflow has been unassigned from the project and is not in the
+/// list, this errors out rather than mis-resolving against another flow's stages
+/// (a numeric --status still works).
 pub fn stages_for_workflow<'a>(
     workflows: &'a [Workflow],
     task_workflow_id: &Option<String>,
@@ -23,8 +24,9 @@ pub fn stages_for_workflow<'a>(
     }
 }
 
-/// 数値ならそのまま (サーバー側で workflow 妥当性を検証)、
-/// それ以外は active なステージのラベル完全一致で値を解決する。
+/// A numeric input is passed through as-is (the server validates it against the
+/// workflow); otherwise the value is resolved by an exact label match against
+/// active stages.
 pub fn resolve_status(input: &str, stages: &[Stage]) -> Result<i64> {
     let input = input.trim();
     if let Ok(value) = input.parse::<i64>() {
@@ -40,7 +42,8 @@ pub fn resolve_status(input: &str, stages: &[Stage]) -> Result<i64> {
     );
 }
 
-/// 終端ステージ (status をこの値に変えると検収/完了フェーズへ自動遷移する)。
+/// The terminal stage (changing status to this value auto-transitions to the
+/// acceptance/done phase).
 pub fn terminal_stage(stages: &[Stage]) -> Result<&Stage> {
     stages
         .iter()
@@ -54,7 +57,7 @@ pub fn terminal_stage(stages: &[Stage]) -> Result<&Stage> {
         })
 }
 
-/// claim の遷移先: --status 指定 > 「対応中」ラベル > 値 40 > エラー。
+/// The claim target stage: --status override > the "対応中" (in-progress) label > value 40 > error.
 pub fn claim_stage(stages: &[Stage], override_status: Option<&str>) -> Result<i64> {
     if let Some(status) = override_status {
         return resolve_status(status, stages);
@@ -121,7 +124,7 @@ mod tests {
         let stages = default_flow_stages();
         assert_eq!(resolve_status("対応中", &stages).unwrap(), 40);
         assert_eq!(resolve_status("70", &stages).unwrap(), 70);
-        assert!(resolve_status("存在しない", &stages).is_err());
+        assert!(resolve_status("nonexistent", &stages).is_err());
     }
 
     #[test]
@@ -144,7 +147,7 @@ mod tests {
         let stages = default_flow_stages();
         assert_eq!(claim_stage(&stages, Some("確認待ち")).unwrap(), 60);
         assert_eq!(claim_stage(&stages, None).unwrap(), 40);
-        // 「対応中」ラベルが無くても値 40 があればそれを使う
+        // Even without the "対応中" label, fall back to value 40 when present
         let renamed: Vec<Stage> = stages
             .iter()
             .cloned()
@@ -156,7 +159,7 @@ mod tests {
             })
             .collect();
         assert_eq!(claim_stage(&renamed, None).unwrap(), 40);
-        // どちらも無ければエラー
+        // Error when neither is present
         let custom = vec![stage(1, "todo", true, false), stage(2, "done", false, true)];
         assert!(claim_stage(&custom, None).is_err());
     }
@@ -175,8 +178,8 @@ mod tests {
         assert_eq!(by_id.len(), 2);
         let null_flow = stages_for_workflow(&flows, &None).unwrap();
         assert_eq!(null_flow.len(), 7);
-        // 未知の id は (割り当て解除された workflow の可能性があるため) エラー。
-        // 別フローへのフォールバックで誤った status 値を送らない
+        // An unknown id errors out (the workflow may have been unassigned).
+        // Do not fall back to another flow and send a wrong status value.
         assert!(stages_for_workflow(&flows, &Some("missing".into())).is_err());
     }
 }
