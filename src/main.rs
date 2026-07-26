@@ -14,14 +14,14 @@ use clap::{Parser, Subcommand};
 /// Taskshoot task operations CLI.
 ///
 /// Authentication (in order of precedence):
-/// 1. TASKSHOOT_API_KEY / TASKSHOOT_CLI_ORGANIZATION environment variables
-/// 2. TASKSHOOT_CLI_ENV_GETTER_COMMAND (executed without a shell; stdout is
-///    parsed as KEY=VALUE lines)
-/// 3. A .loadenv.sh (searched upward from the current directory) exporting
-///    TASKSHOOT_CLI_ENV_GETTER_COMMAND
+/// 1. Command line flags (--org)
+/// 2. TASKSHOOT_API_KEY / TASKSHOOT_CLI_ORGANIZATION environment variables
+/// 3. ~/.config/taskshoot/config.yml (see `taskshoot config init`), with the
+///    YAML printed by its config_override_command merged over it
 ///
-/// TASKSHOOT_API_ORIGIN overrides the API origin (default:
-/// https://taskshoot-api.cyberneura.com; use http://127.0.0.1:8008 for local dev).
+/// TASKSHOOT_API_ORIGIN, or api_origin in the config file, overrides the API
+/// origin (default: https://taskshoot-api.cyberneura.com; use
+/// http://127.0.0.1:8008 for local dev).
 #[derive(Parser)]
 #[command(name = "taskshoot", version, about = "Taskshoot task operations CLI")]
 struct Cli {
@@ -114,16 +114,20 @@ enum Cmd {
     /// List / mark-read your notifications (bot mention inbox; user-scoped)
     #[command(subcommand)]
     Notifications(NotificationsCmd),
-    /// Allow executing the getter command of a discovered .loadenv.sh
-    /// (direnv-style allow; defaults to the nearest candidate)
-    ///
-    /// Only relevant when credentials come from a .loadenv.sh (precedence 3).
-    /// Setting TASKSHOOT_CLI_ENV_GETTER_COMMAND -- or both TASKSHOOT_API_KEY and
-    /// TASKSHOOT_CLI_ORGANIZATION -- skips the .loadenv.sh search entirely, so
-    /// trust is unnecessary. Note that TASKSHOOT_API_KEY alone is not enough:
-    /// org-scoped commands still search for a .loadenv.sh to resolve the
-    /// organization when neither --org nor TASKSHOOT_CLI_ORGANIZATION is given.
-    Trust { path: Option<PathBuf> },
+    /// Inspect or create the config file (~/.config/taskshoot/config.yml)
+    #[command(subcommand)]
+    Config(ConfigCmd),
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print the path of the config file that will be read
+    Path,
+    /// Create a template config file (readable only by you) if none exists
+    Init,
+    /// Print the merged configuration, running config_override_command.
+    /// The API key is masked.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -301,9 +305,14 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    // trust needs no API configuration (handle it before config resolution)
-    if let Cmd::Trust { path } = &cli.command {
-        return config::trust_loadenv(path.clone());
+    // The config subcommand must work before credentials resolve, since it is
+    // what you reach for when they do not.
+    if let Cmd::Config(config_cmd) = &cli.command {
+        return match config_cmd {
+            ConfigCmd::Path => config::print_config_path(),
+            ConfigCmd::Init => config::init_config(),
+            ConfigCmd::Show => config::show_config(cli.json),
+        };
     }
     // me / orgs / notifications need no org (notifications are user-scoped)
     let need_org = !matches!(cli.command, Cmd::Me | Cmd::Orgs | Cmd::Notifications(_));
@@ -311,8 +320,8 @@ fn run() -> Result<()> {
     let api = api::Api::new(&config)?;
     let json = cli.json;
     match cli.command {
-        // Trust was already handled before config resolution
-        Cmd::Trust { .. } => unreachable!("handled before config resolution"),
+        // Config was already handled before credential resolution
+        Cmd::Config(_) => unreachable!("handled before config resolution"),
         Cmd::Me => commands::me(&api, json),
         Cmd::Orgs => commands::orgs(&api, json),
         Cmd::Projects => commands::projects(&api, json),

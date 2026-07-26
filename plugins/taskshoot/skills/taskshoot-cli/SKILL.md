@@ -34,27 +34,44 @@ An API key (`tssk-...`) is required. It is issued from Taskshoot under
 
 The key and organization are resolved in this order:
 
-1. **Environment variables** — `TASKSHOOT_API_KEY` and `TASKSHOOT_CLI_ORGANIZATION`.
-   Use this for CI or an AI agent that passes credentials directly. Exporting both skips
-   any file discovery.
-2. **Getter command** — the command in `TASKSHOOT_CLI_ENV_GETTER_COMMAND` is run (without
-   a shell) and its stdout is parsed as an env-file (`KEY=VALUE`, `#` comments allowed).
-   Useful for fetching the key from a secret manager on demand.
-3. **`.loadenv.sh` discovery** — the CLI searches upward from the current directory and
-   from the executable's directory for a `.loadenv.sh`, and runs only its
-   `export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...` line. A discovered file must be approved
-   once with `taskshoot trust <path>` (direnv-style; re-approve if you edit it).
+1. **Command line flags** — `--org` overrides the organization for one invocation.
+2. **Environment variables** — `TASKSHOOT_API_KEY`, `TASKSHOOT_CLI_ORGANIZATION`,
+   `TASKSHOOT_API_ORIGIN`. Use this for CI or an AI agent that passes credentials
+   directly.
+3. **Config file** — `~/.config/taskshoot/config.yml` (`config.yaml` is the fallback),
+   optionally overlaid with the YAML printed by its `config_override_command`.
+
+```bash
+taskshoot config init   # create ~/.config/taskshoot/config.yml (mode 600)
+taskshoot config path   # print the file that will be read
+taskshoot config show   # print the merged result (the API key is masked)
+```
+
+```yaml
+# ~/.config/taskshoot/config.yml
+organization: cyberneura
+api_key: tssk-...
+
+# Or fetch the key from a cloud secret store instead of writing it here. The
+# command runs without a shell and must print YAML, which is merged over this
+# file. This is the intended setup: the key never sits in plaintext on disk.
+# config_override_command: op read "op://development/taskshoot/config-yaml"
+# config_override_command: aws ssm get-parameter --name /taskshoot/config --with-decryption --query Parameter.Value --output text
+```
 
 Notes:
 
-- `TASKSHOOT_API_KEY` alone is not enough for org-scoped commands: without
-  `TASKSHOOT_CLI_ORGANIZATION` (or `--org`) they fall back to `.loadenv.sh` discovery to
-  resolve the organization. `me` / `orgs` / `notifications` need no org and work with the
-  key alone.
+- `config_override_command` runs on every invocation. If it prompts (Touch ID), wrap it
+  in your own caching script.
+- The config file is skipped entirely when `TASKSHOOT_API_KEY`, `TASKSHOOT_API_ORIGIN`
+  and the organization all come from flags or the environment. Set all three in a bot
+  loop to keep the command from running.
+- `me` / `orgs` / `notifications` need no organization and work with the key alone.
 - The API endpoint defaults to `https://taskshoot-api.cyberneura.com`. Point at a local
-  dev server with `export TASKSHOOT_API_ORIGIN=http://127.0.0.1:8008`.
-- **Never print a raw API key to stdout or a transcript.** Pass it via env vars or a
-  getter command.
+  dev server with `export TASKSHOOT_API_ORIGIN=http://127.0.0.1:8008` or `api_origin:`
+  in the config file.
+- **Never print a raw API key to stdout or a transcript.** `taskshoot config show` masks
+  it; a getter command's raw output does not.
 
 First, confirm who you are authenticated as:
 

@@ -1,6 +1,6 @@
 [package]
 name = "taskshoot"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 description = "Taskshoot task operations CLI (AI-agent friendly)"
@@ -30,7 +30,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+serde_yaml = "0.9"
 shlex = "1"
 unicode-width = "0.2"
 uuid = "1"

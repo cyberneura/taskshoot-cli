@@ -56,66 +56,99 @@ An API key (`tssk-...`) is issued from Taskshoot under `/settings/api-keys` (a p
 key), or from a Bot user in organization management. Write operations require a
 write-scoped key. Organization-scoped keys (deprecated) are not accepted.
 
+This CLI is designed with a strong bias toward keeping the API key in a cloud secret
+store — 1Password, AWS Systems Manager Parameter Store, or anything else with a command
+line client. `config_override_command` (below) fetches the key at the moment it is
+needed, so the key never has to sit in plaintext on disk, and rotating it in the store is
+enough to rotate it everywhere.
+
 The key and organization are resolved in this order of precedence:
 
-1. **Environment variables** — `TASKSHOOT_API_KEY` / `TASKSHOOT_CLI_ORGANIZATION`.
-   Use this when CI or an AI agent passes credentials directly, or in any process where
-   1Password Touch ID approval is unavailable.
-2. **Getter command** — the command in `TASKSHOOT_CLI_ENV_GETTER_COMMAND` is executed
-   (without a shell) and its stdout is parsed as an env-file (`KEY=VALUE`, `#` comments
-   allowed).
-3. **`.loadenv.sh` discovery** — `taskshoot` searches upward from the current directory,
-   then upward from the executable's directory, for a `.loadenv.sh`, and extracts only
-   the `export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...` line to run as in (2) (it never
-   executes the whole file as a shell script). **A discovered file is only trusted after
-   you explicitly approve it with `taskshoot trust <path>`** (direnv-style; the approval
-   is recorded with a content hash in `~/.config/taskshoot/trusted-loadenv`, and editing
-   the file requires re-approval). This prevents an untrusted repository from running
-   arbitrary commands when you invoke the CLI inside it.
+1. **Command line flags** — `--org` overrides the organization for a single invocation.
+2. **Environment variables** — `TASKSHOOT_API_KEY` / `TASKSHOOT_CLI_ORGANIZATION` /
+   `TASKSHOOT_API_ORIGIN`. Use this when CI or an AI agent passes credentials directly,
+   or in any process where 1Password Touch ID approval is unavailable.
+3. **Config file** — `~/.config/taskshoot/config.yml`, optionally overlaid with the YAML
+   printed by its `config_override_command`.
 
-> **`taskshoot trust` is only needed for path 3.** With the setups below (including
-> exports via a shell profile or wrapper script), `.loadenv.sh` discovery never runs, so
-> neither `.loadenv.sh` nor `trust` is required. Running `taskshoot trust` with no
-> argument in such a setup prints "trust is not needed" and exits successfully.
->
-> - `TASKSHOOT_CLI_ENV_GETTER_COMMAND` is exported (discovery is always skipped).
-> - Both `TASKSHOOT_API_KEY` **and** `TASKSHOOT_CLI_ORGANIZATION` are exported.
->
-> Note that `TASKSHOOT_API_KEY` **alone is not enough**: org-scoped commands
-> (`projects` / `tasks` / …) that receive neither `--org` nor `TASKSHOOT_CLI_ORGANIZATION`
-> will **search for a `.loadenv.sh` in order to resolve the organization**. In that case
-> an untrusted candidate is skipped and the command fails with
-> `TASKSHOOT_CLI_ORGANIZATION is not set`, so trust (or an explicit org) is required.
-> `me` / `orgs` (which need no org) work with the key alone.
+### Config file
 
-### 1Password setup example
-
-Create an item in your 1Password vault with an env-file-formatted field:
-
-```
-TASKSHOOT_CLI_ORGANIZATION=cyberneura
-TASKSHOOT_API_KEY=tssk-...
+```bash
+taskshoot config init   # create ~/.config/taskshoot/config.yml (mode 600)
+taskshoot config path   # print the file that will be read
+taskshoot config show   # print the merged result (the API key is masked)
 ```
 
-Put a `.loadenv.sh` in a **directory that will be searched** and register trust.
-Discovery only looks at ancestors of the current directory and ancestors of the
-executable — **it never looks into child directories**:
+`config.yml` is preferred; `config.yaml` is used when `config.yml` does not exist. Only
+one of the two is ever read. The file may hold a plaintext API key, so it is created
+with mode `600`, and permissions are tightened back to `600` whenever it is read.
 
-- **Using it inside a repository**: place it at the repository root (found from anywhere
-  inside the repo).
-- **Using a `cargo install`ed binary from anywhere**: place it at `~/.loadenv.sh`
-  (`$HOME` is an ancestor of `~/.cargo/bin`, so it is found via the executable-side
-  search), or export `TASKSHOOT_CLI_ENV_GETTER_COMMAND` from your shell profile
-  (no discovery needed).
-
-```sh
-echo 'export TASKSHOOT_CLI_ENV_GETTER_COMMAND='"'"'op read "op://development/taskshoot/taskshoot-cli"'"'"' > .loadenv.sh
-taskshoot trust .loadenv.sh   # once; re-run if you edit the file
+```yaml
+api_key: tssk-...
+organization: cyberneura
+api_origin: https://taskshoot-api.cyberneura.com   # optional
 ```
+
+### Keeping the key out of the file
+
+`config_override_command` runs a command **without a shell** (so pipes, redirects and
+substitutions are not available) and merges the YAML it prints on stdout over the rest of
+the file. Mappings are merged recursively; scalars and sequences are replaced wholesale.
+Values from the command win over values written in the file.
+
+```yaml
+# ~/.config/taskshoot/config.yml
+api_origin: http://127.0.0.1:8008
+config_override_command: op read "op://development/taskshoot/config-yaml"
+```
+
+Whatever the command prints must be a YAML mapping, so the stored secret looks like this:
+
+```yaml
+api_key: tssk-...
+organization: cyberneura
+```
+
+Any secret store with a command line client works the same way. AWS Systems Manager
+Parameter Store, for example:
+
+```yaml
+config_override_command: aws ssm get-parameter --name /taskshoot/config --with-decryption --query Parameter.Value --output text
+```
+
+Notes:
+
+- The command runs on **every invocation**, so a slow or interactive helper (`op read`
+  with Touch ID) is felt on every command. Wrap it in your own caching script if that
+  matters.
+- A non-zero exit, empty output, or output that is not a YAML mapping is an error. The
+  CLI never silently falls back to a different credential.
+- `config_override_command` in the fetched YAML is ignored — there is no second round.
+- The command does not inherit `TASKSHOOT_API_KEY` from the environment, so it cannot
+  read back a key that is already set.
+- The config file is skipped entirely when `TASKSHOOT_API_KEY`, `TASKSHOOT_API_ORIGIN`
+  and the organization all come from flags or the environment, since it could not
+  contribute anything. Set all three to keep the command from running in a bot loop.
+
+### Migrating from 0.1.0
+
+`.loadenv.sh` discovery, `TASKSHOOT_CLI_ENV_GETTER_COMMAND` and the `taskshoot trust`
+subcommand were removed in 0.2.0. Replace them with the config file:
+
+1. Run `taskshoot config init`.
+2. Move the getter command to `config_override_command:` in that file.
+3. Change what the command prints from `KEY=VALUE` lines to YAML — `TASKSHOOT_API_KEY`
+   becomes `api_key`, `TASKSHOOT_CLI_ORGANIZATION` becomes `organization`, and
+   `TASKSHOOT_API_ORIGIN` becomes `api_origin`.
+4. Delete `~/.config/taskshoot/trusted-loadenv` and any leftover `.loadenv.sh`.
+
+The environment variables themselves are unchanged, so setups that export
+`TASKSHOOT_API_KEY` directly need no migration.
 
 ### API endpoint
 
-The default is `https://taskshoot-api.cyberneura.com`. To point at a local dev server:
+The default is `https://taskshoot-api.cyberneura.com`. To point at a local dev server,
+either export the variable or set `api_origin:` in the config file:
 
 ```bash
 export TASKSHOOT_API_ORIGIN=http://127.0.0.1:8008
