@@ -217,7 +217,7 @@ fn load_local_config(path: &Path) -> Result<Mapping> {
     tighten_permissions(path)?;
     let text =
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
-    parse_mapping(&text, &path.display().to_string())
+    parse_mapping(&text, &path.display().to_string(), true)
 }
 
 /// Read the config file and merge the YAML produced by its
@@ -229,7 +229,7 @@ fn load_merged_config() -> Result<Mapping> {
         return Ok(doc);
     };
     let stdout = run_override_command(&cmd)?;
-    let overrides = parse_mapping(&stdout, &format!("{OVERRIDE_COMMAND_KEY}: {cmd}"))?;
+    let overrides = parse_mapping(&stdout, &format!("{OVERRIDE_COMMAND_KEY}: {cmd}"), false)?;
     merge_mapping(&mut doc, &overrides);
     // The fetched YAML is not re-expanded, so an override command it carries is
     // never run. Put the local one back, both to discard the fetched value and
@@ -241,12 +241,16 @@ fn load_merged_config() -> Result<Mapping> {
     Ok(doc)
 }
 
-fn parse_mapping(text: &str, source: &str) -> Result<Mapping> {
+/// `null_is_empty` distinguishes the two callers. A config file holding only
+/// comments parses as null and legitimately means "nothing set here", but the
+/// same output from the override command means the helper produced nothing
+/// usable — accepting it would leave stale local values in place while looking
+/// like the fetch succeeded.
+fn parse_mapping(text: &str, source: &str, null_is_empty: bool) -> Result<Mapping> {
     let value: Value = serde_yaml::from_str(text)
         .with_context(|| format!("failed to parse YAML from {source}"))?;
     match value {
-        // A file holding only comments parses as null
-        Value::Null => Ok(Mapping::new()),
+        Value::Null if null_is_empty => Ok(Mapping::new()),
         Value::Mapping(mapping) => Ok(mapping),
         _ => bail!("{source} is not a YAML mapping"),
     }
@@ -509,7 +513,7 @@ mod tests {
     use super::*;
 
     fn mapping(yaml: &str) -> Mapping {
-        parse_mapping(yaml, "test").unwrap()
+        parse_mapping(yaml, "test", true).unwrap()
     }
 
     #[test]
@@ -519,9 +523,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_mapping_rejects_null_from_the_override_command() {
+        // A helper that produced nothing usable must fail rather than leave the
+        // local values in place while looking like the fetch succeeded
+        for text in ["null\n", "~\n", "# not found\n", ""] {
+            assert!(
+                parse_mapping(text, "test", false).is_err(),
+                "override output {text:?} should be rejected"
+            );
+            assert!(parse_mapping(text, "test", true).is_ok());
+        }
+    }
+
+    #[test]
     fn parse_mapping_rejects_non_mapping() {
-        assert!(parse_mapping("- a\n- b\n", "test").is_err());
-        assert!(parse_mapping("api_key: [\n", "test").is_err());
+        assert!(parse_mapping("- a\n- b\n", "test", true).is_err());
+        assert!(parse_mapping("api_key: [\n", "test", true).is_err());
     }
 
     #[test]
