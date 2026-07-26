@@ -156,6 +156,12 @@ subcommand were removed.** Replace them with the config file:
    `TASKSHOOT_API_ORIGIN` becomes `api_origin`.
 4. Delete `~/.config/taskshoot/trusted-loadenv` and any leftover `.loadenv.sh`.
 
+Nothing outside `$HOME` is read any more, not even to detect a leftover `.loadenv.sh`, so
+running the CLI inside an untrusted checkout cannot make it open a file there. A setup
+that still exports `TASKSHOOT_CLI_ENV_GETTER_COMMAND` is reported on stderr, and one that
+supplies nothing usable fails with the migration steps above rather than falling back to
+a key or an API origin you did not intend.
+
 ### API endpoint
 
 The default is `https://taskshoot-api.cyberneura.com`. To point at a local dev server,

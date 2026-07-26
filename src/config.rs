@@ -15,8 +15,6 @@ const OVERRIDE_COMMAND_KEY: &str = "config_override_command";
 const OVERRIDE_TIMEOUT: Duration = Duration::from_secs(120);
 // Removed in favour of the config file; only referenced to guide migration
 const LEGACY_GETTER_ENV: &str = "TASKSHOOT_CLI_ENV_GETTER_COMMAND";
-// Enough to reach the export line of any real .loadenv.sh
-const LEGACY_SCAN_LIMIT: u64 = 64 * 1024;
 // Renamed so that every variable this CLI reads shares the TASKSHOOT_CLI_ prefix
 const RENAMED_ENV: [(&str, &str); 2] = [
     ("TASKSHOOT_API_KEY", "TASKSHOOT_CLI_API_KEY"),
@@ -210,13 +208,17 @@ fn tighten_permissions(_path: &Path) -> Result<()> {
 
 /// Read the config file. A missing file is not an error: credentials may come
 /// from the environment instead.
+///
+/// Only an absent file counts as "nothing configured". `Path::exists()` would
+/// report the same for an unreadable directory, and the command would then fall
+/// back to defaults — the production API origin among them — without a word.
 fn load_local_config(path: &Path) -> Result<Mapping> {
-    if !path.exists() {
-        return Ok(Mapping::new());
-    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Mapping::new()),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
     tighten_permissions(path)?;
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     parse_mapping(&text, &path.display().to_string(), true)
 }
 
@@ -378,55 +380,22 @@ fn missing_api_key_message() -> Result<String> {
     Ok(message)
 }
 
-/// Detect a leftover .loadenv.sh setup, which is no longer read.
+/// Detect a pre-0.2.0 setup that is no longer read.
+///
+/// Only the environment is inspected. An earlier version also scanned every
+/// ancestor of the current directory for a `.loadenv.sh`, but that put a file
+/// read back under the control of whatever checkout the CLI was invoked in —
+/// the very exposure that dropping `.loadenv.sh` discovery was meant to end.
+/// A hint is not worth that, and anyone still holding one gets told by the
+/// missing-key error and the migration notes.
 fn legacy_setup_hint() -> Option<String> {
-    if env::var_os(LEGACY_GETTER_ENV).is_some() {
-        return Some(format!(
+    env::var_os(LEGACY_GETTER_ENV).is_some().then(|| {
+        format!(
             "{LEGACY_GETTER_ENV} is set but is no longer supported. \
              Move the command to `{OVERRIDE_COMMAND_KEY}:` in the config file; \
-             it must now print YAML instead of KEY=VALUE lines."
-        ));
-    }
-    // Only a file that actually exports the getter is ours. `.loadenv.sh` is a
-    // generic convention, so matching on the name alone would blame an
-    // unrelated project's file that this CLI never read in the first place.
-    let found = env::current_dir()
-        .ok()?
-        .ancestors()
-        .map(|dir| dir.join(".loadenv.sh"))
-        .find(|path| exports_legacy_getter(path))?;
-    Some(format!(
-        "{} exists but is no longer read. Move its getter command to \
-         `{OVERRIDE_COMMAND_KEY}:` in the config file; it must now print YAML \
-         instead of KEY=VALUE lines. `taskshoot trust` has been removed.",
-        found.display()
-    ))
-}
-
-/// This runs against paths inside whatever directory the CLI happens to be
-/// invoked from, so it must stay safe in a hostile checkout. `symlink_metadata`
-/// refuses to follow a link (`.loadenv.sh -> /dev/zero` would otherwise read
-/// forever), the file type is required to be regular, and the read is bounded.
-/// Being a migration hint, a false negative costs nothing.
-fn exports_legacy_getter(path: &Path) -> bool {
-    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()) {
-        return false;
-    }
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut content = String::new();
-    if file
-        .take(LEGACY_SCAN_LIMIT)
-        .read_to_string(&mut content)
-        .is_err()
-    {
-        return false;
-    }
-    content.lines().any(|line| {
-        line.trim_start()
-            .trim_start_matches("export ")
-            .starts_with(LEGACY_GETTER_ENV)
+             it must now print YAML instead of KEY=VALUE lines. \
+             `.loadenv.sh` discovery and `taskshoot trust` have been removed."
+        )
     })
 }
 
