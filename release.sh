@@ -37,7 +37,6 @@ step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 fail() { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 
 command -v jq >/dev/null || fail "jq is required"
-command -v gh >/dev/null || fail "gh is required"
 
 # --- version ---------------------------------------------------------------
 # cargo metadata rather than grepping Cargo.toml, so a version string that
