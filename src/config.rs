@@ -296,7 +296,11 @@ fn run_override_command(cmd: &str) -> Result<String> {
     }
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
+        // Withhold the key under both the current and the pre-0.2.0 name. A
+        // setup mid-migration still has the old one exported, and the helper
+        // (or its diagnostics) must not be able to read the credential back.
         .env_remove("TASKSHOOT_CLI_API_KEY")
+        .env_remove("TASKSHOOT_API_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -377,14 +381,16 @@ fn legacy_setup_hint() -> Option<String> {
 }
 
 /// `taskshoot config path`
+///
+/// stdout carries the bare path so that `$(taskshoot config path)` can be fed
+/// straight to an editor or a file operation; the "not created yet" note goes
+/// to stderr rather than corrupting that value.
 pub fn print_config_path() -> Result<()> {
     let path = config_path()?;
-    let state = if path.exists() {
-        "exists"
-    } else {
-        "does not exist yet"
-    };
-    println!("{} ({state})", path.display());
+    println!("{}", path.display());
+    if !path.exists() {
+        eprintln!("taskshoot: not created yet; run `taskshoot config init`");
+    }
     Ok(())
 }
 
