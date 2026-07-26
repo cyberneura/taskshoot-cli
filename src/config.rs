@@ -15,6 +15,8 @@ const OVERRIDE_COMMAND_KEY: &str = "config_override_command";
 const OVERRIDE_TIMEOUT: Duration = Duration::from_secs(120);
 // Removed in favour of the config file; only referenced to guide migration
 const LEGACY_GETTER_ENV: &str = "TASKSHOOT_CLI_ENV_GETTER_COMMAND";
+// Enough to reach the export line of any real .loadenv.sh
+const LEGACY_SCAN_LIMIT: u64 = 64 * 1024;
 // Renamed so that every variable this CLI reads shares the TASKSHOOT_CLI_ prefix
 const RENAMED_ENV: [(&str, &str); 2] = [
     ("TASKSHOOT_API_KEY", "TASKSHOOT_CLI_API_KEY"),
@@ -397,13 +399,30 @@ fn legacy_setup_hint() -> Option<String> {
     ))
 }
 
+/// This runs against paths inside whatever directory the CLI happens to be
+/// invoked from, so it must stay safe in a hostile checkout. `symlink_metadata`
+/// refuses to follow a link (`.loadenv.sh -> /dev/zero` would otherwise read
+/// forever), the file type is required to be regular, and the read is bounded.
+/// Being a migration hint, a false negative costs nothing.
 fn exports_legacy_getter(path: &Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|content| {
-        content.lines().any(|line| {
-            line.trim_start()
-                .trim_start_matches("export ")
-                .starts_with(LEGACY_GETTER_ENV)
-        })
+    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut content = String::new();
+    if file
+        .take(LEGACY_SCAN_LIMIT)
+        .read_to_string(&mut content)
+        .is_err()
+    {
+        return false;
+    }
+    content.lines().any(|line| {
+        line.trim_start()
+            .trim_start_matches("export ")
+            .starts_with(LEGACY_GETTER_ENV)
     })
 }
 
@@ -457,9 +476,13 @@ pub fn init_config() -> Result<()> {
 /// `taskshoot config show` — the merged configuration, with the API key masked.
 pub fn show_config(json: bool) -> Result<()> {
     let mut doc = load_merged_config()?;
-    if let Some(Value::String(api_key)) = doc.get("api_key") {
-        let masked = Value::String(mask_secret(api_key));
-        doc.insert(Value::String("api_key".into()), masked);
+    if let Some(api_key) = doc.get_mut("api_key") {
+        *api_key = match api_key {
+            Value::String(key) => Value::String(mask_secret(key)),
+            // A wrongly shaped value is exactly what this command gets run to
+            // diagnose, so it must not be the one thing that prints verbatim.
+            _ => Value::String("<hidden: api_key is not a string>".into()),
+        };
     }
     let value = Value::Mapping(doc);
     if json {
