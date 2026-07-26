@@ -1,6 +1,6 @@
 [package]
 name = "taskshoot"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.82"
 description = "Taskshoot task operations CLI (AI-agent friendly)"
