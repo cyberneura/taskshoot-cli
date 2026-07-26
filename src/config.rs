@@ -80,8 +80,19 @@ pub fn resolve(org_override: Option<String>, need_org: bool) -> Result<Config> {
         None => bail!(missing_api_key_message()?),
     };
     let organization = or_from_config(org_override.or(env_org), &doc, "organization")?;
-    let api_origin = or_from_config(env_origin, &doc, "api_origin")?
-        .unwrap_or_else(|| DEFAULT_API_ORIGIN.to_string());
+    let api_origin = match or_from_config(env_origin, &doc, "api_origin")? {
+        Some(api_origin) => api_origin,
+        None => {
+            // A pre-0.2.0 setup could supply the origin through the getter
+            // command, which is no longer read. Falling back silently would
+            // point a command meant for a local server at production.
+            if let Some(hint) = legacy_setup_hint() {
+                eprintln!("taskshoot: using the default API origin {DEFAULT_API_ORIGIN}");
+                eprintln!("taskshoot: {hint}");
+            }
+            DEFAULT_API_ORIGIN.to_string()
+        }
+    };
 
     Ok(Config {
         api_origin: api_origin.trim_end_matches('/').to_string(),
@@ -221,7 +232,10 @@ fn load_merged_config() -> Result<Mapping> {
     // The fetched YAML is not re-expanded, so an override command it carries is
     // never run. Put the local one back, both to discard the fetched value and
     // to keep `config show` able to display what actually ran.
-    doc.insert(Value::String(OVERRIDE_COMMAND_KEY.into()), Value::String(cmd));
+    doc.insert(
+        Value::String(OVERRIDE_COMMAND_KEY.into()),
+        Value::String(cmd),
+    );
     Ok(doc)
 }
 
@@ -367,17 +381,30 @@ fn legacy_setup_hint() -> Option<String> {
              it must now print YAML instead of KEY=VALUE lines."
         ));
     }
+    // Only a file that actually exports the getter is ours. `.loadenv.sh` is a
+    // generic convention, so matching on the name alone would blame an
+    // unrelated project's file that this CLI never read in the first place.
     let found = env::current_dir()
         .ok()?
         .ancestors()
         .map(|dir| dir.join(".loadenv.sh"))
-        .find(|path| path.is_file())?;
+        .find(|path| exports_legacy_getter(path))?;
     Some(format!(
         "{} exists but is no longer read. Move its getter command to \
          `{OVERRIDE_COMMAND_KEY}:` in the config file; it must now print YAML \
          instead of KEY=VALUE lines. `taskshoot trust` has been removed.",
         found.display()
     ))
+}
+
+fn exports_legacy_getter(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|content| {
+        content.lines().any(|line| {
+            line.trim_start()
+                .trim_start_matches("export ")
+                .starts_with(LEGACY_GETTER_ENV)
+        })
+    })
 }
 
 /// `taskshoot config path`
@@ -397,8 +424,7 @@ pub fn print_config_path() -> Result<()> {
 /// `taskshoot config init`
 pub fn init_config() -> Result<()> {
     let dir = config_dir()?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("cannot create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -478,7 +504,10 @@ mod tests {
     #[test]
     fn merge_prefers_override_and_recurses_into_mappings() {
         let mut base = mapping("api_key: local\napi_origin: http://127.0.0.1:8008\n");
-        merge_mapping(&mut base, &mapping("api_key: fetched\norganization: acme\n"));
+        merge_mapping(
+            &mut base,
+            &mapping("api_key: fetched\norganization: acme\n"),
+        );
         assert_eq!(doc_str(&base, "api_key").unwrap().unwrap(), "fetched");
         assert_eq!(doc_str(&base, "organization").unwrap().unwrap(), "acme");
         // Untouched keys survive the merge
