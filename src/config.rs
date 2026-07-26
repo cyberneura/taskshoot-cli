@@ -1,18 +1,48 @@
-use std::collections::HashMap;
 use std::env;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use serde_yaml::{Mapping, Value};
 use wait_timeout::ChildExt;
 
 pub const DEFAULT_API_ORIGIN: &str = "https://taskshoot-api.cyberneura.com";
-const GETTER_ENV: &str = "TASKSHOOT_CLI_ENV_GETTER_COMMAND";
-// `op read` can be slow on the first biometric authentication
-const GETTER_TIMEOUT: Duration = Duration::from_secs(120);
+const OVERRIDE_COMMAND_KEY: &str = "config_override_command";
+// `op read` and similar helpers can be slow on the first biometric prompt
+const OVERRIDE_TIMEOUT: Duration = Duration::from_secs(120);
+// Removed in favour of the config file; only referenced to guide migration
+const LEGACY_GETTER_ENV: &str = "TASKSHOOT_CLI_ENV_GETTER_COMMAND";
+// Renamed so that every variable this CLI reads shares the TASKSHOOT_CLI_ prefix
+const RENAMED_ENV: [(&str, &str); 2] = [
+    ("TASKSHOOT_API_KEY", "TASKSHOOT_CLI_API_KEY"),
+    ("TASKSHOOT_API_ORIGIN", "TASKSHOOT_CLI_API_ORIGIN"),
+];
+
+const CONFIG_TEMPLATE: &str = r#"# Taskshoot CLI config file
+# https://github.com/cyberneura/taskshoot-cli
+#
+# Precedence: command line flags > environment variables > this file.
+# Environment variables: TASKSHOOT_CLI_API_KEY, TASKSHOOT_CLI_ORGANIZATION,
+# TASKSHOOT_CLI_API_ORIGIN.
+
+# api_key: tssk-xxxxxxxxxxxx
+# organization: your-org-code-name
+
+# Override the API origin (use http://127.0.0.1:8008 for local development).
+# api_origin: https://taskshoot-api.cyberneura.com
+
+# Keep the API key out of this file by fetching it from a secret store.
+#
+# config_override_command runs a command (without a shell) whose stdout must be
+# YAML, and merges that YAML over this file. Mappings are merged recursively;
+# scalars and sequences are replaced wholesale. Any key can be overridden this
+# way, and the fetched YAML wins over the values written above.
+#
+# config_override_command: op read "op://development/taskshoot/config-yaml"
+"#;
 
 // Do not derive Debug (it holds api_key; prevents leaking it in future debug output)
 #[derive(Clone)]
@@ -24,39 +54,45 @@ pub struct Config {
 }
 
 /// Resolution order:
-/// 1. Direct env (TASKSHOOT_API_KEY / TASKSHOOT_CLI_ORGANIZATION) — the CI/agent case
-/// 2. Run env TASKSHOOT_CLI_ENV_GETTER_COMMAND without a shell and take its
-///    env-file-formatted stdout
-/// 3. Extract just the getter command line from a .loadenv.sh (current dir →
-///    ancestors → executable location) and fall through to 2
-///
-/// Commands with `need_org=false` (me / orgs) do not launch the getter
-/// (`op read` = auth may run) just to obtain an org when the key is already available.
+/// 1. Command line flags (--org)
+/// 2. Environment variables (TASKSHOOT_CLI_API_KEY / TASKSHOOT_CLI_ORGANIZATION /
+///    TASKSHOOT_CLI_API_ORIGIN) — the CI / agent case
+/// 3. ~/.config/taskshoot/config.yml, with the YAML produced by its
+///    `config_override_command` merged over it
 pub fn resolve(org_override: Option<String>, need_org: bool) -> Result<Config> {
-    let env_key = non_empty_env("TASKSHOOT_API_KEY");
+    let env_key = non_empty_env("TASKSHOOT_CLI_API_KEY");
     let env_org = non_empty_env("TASKSHOOT_CLI_ORGANIZATION");
-    let env_origin = non_empty_env("TASKSHOOT_API_ORIGIN");
+    let env_origin = non_empty_env("TASKSHOOT_CLI_API_ORIGIN");
 
-    let mut fetched: HashMap<String, String> = HashMap::new();
-    let org_unresolved = env_org.is_none() && org_override.is_none();
-    if env_key.is_none() || (need_org && org_unresolved) {
-        if let Some(cmd) = find_getter_command()? {
-            fetched = run_getter_command(&cmd)?;
+    let doc = if config_is_needed(
+        need_org,
+        env_key.is_some(),
+        env_origin.is_some(),
+        org_override.is_some() || env_org.is_some(),
+    ) {
+        load_merged_config()?
+    } else {
+        Mapping::new()
+    };
+
+    let api_key = match or_from_config(env_key, &doc, "api_key")? {
+        Some(api_key) => api_key,
+        None => bail!(missing_api_key_message()?),
+    };
+    let organization = or_from_config(org_override.or(env_org), &doc, "organization")?;
+    let api_origin = match or_from_config(env_origin, &doc, "api_origin")? {
+        Some(api_origin) => api_origin,
+        None => {
+            // A pre-0.2.0 setup could supply the origin through the getter
+            // command, which is no longer read. Falling back silently would
+            // point a command meant for a local server at production.
+            if let Some(hint) = legacy_setup_hint() {
+                eprintln!("taskshoot: using the default API origin {DEFAULT_API_ORIGIN}");
+                eprintln!("taskshoot: {hint}");
+            }
+            DEFAULT_API_ORIGIN.to_string()
         }
-    }
-
-    let api_key = env_key
-        .or_else(|| fetched.get("TASKSHOOT_API_KEY").cloned())
-        .context(
-            "TASKSHOOT_API_KEY is not set. Set it directly, or provide \
-             TASKSHOOT_CLI_ENV_GETTER_COMMAND (or a .loadenv.sh exporting it).",
-        )?;
-    let organization = org_override
-        .or(env_org)
-        .or_else(|| fetched.get("TASKSHOOT_CLI_ORGANIZATION").cloned());
-    let api_origin = env_origin
-        .or_else(|| fetched.get("TASKSHOOT_API_ORIGIN").cloned())
-        .unwrap_or_else(|| DEFAULT_API_ORIGIN.to_string());
+    };
 
     Ok(Config {
         api_origin: api_origin.trim_end_matches('/').to_string(),
@@ -65,261 +101,198 @@ pub fn resolve(org_override: Option<String>, need_org: bool) -> Result<Config> {
     })
 }
 
+/// Fall back to a config file value only when the higher-precedence source did
+/// not supply one.
+///
+/// `Option::or` would evaluate its argument eagerly, so a malformed value in
+/// the file would abort the command even though a flag or environment variable
+/// already shadowed it — the opposite of the documented precedence.
+fn or_from_config(resolved: Option<String>, doc: &Mapping, key: &str) -> Result<Option<String>> {
+    match resolved {
+        Some(value) => Ok(Some(value)),
+        None => doc_str(doc, key),
+    }
+}
+
+/// Warn about credentials left under the pre-0.2.0 variable names. Staying
+/// silent would let a stale variable look like it is in effect while the key
+/// actually comes from somewhere else. Called for every subcommand, including
+/// the `config` ones, since those are where the mismatch gets investigated.
+pub fn warn_about_renamed_env() {
+    for (old, new) in RENAMED_ENV {
+        if env::var_os(old).is_some() {
+            eprintln!("taskshoot: {old} is no longer read; it was renamed to {new}");
+        }
+    }
+}
+
+/// Whether the config file can still change the outcome.
+///
+/// Reading it is cheap, but it may carry a config_override_command that shells
+/// out to a secret store and prompts for authentication, so it is skipped when
+/// flags and the environment already decide every value it could supply.
+///
+/// api_origin has to be part of the condition: a config file may point at a
+/// local development origin, and skipping without it would silently send
+/// requests to production instead.
+fn config_is_needed(need_org: bool, has_key: bool, has_origin: bool, has_org: bool) -> bool {
+    let org_resolved = !need_org || has_org;
+    !(has_key && has_origin && org_resolved)
+}
+
 fn non_empty_env(name: &str) -> Option<String> {
     env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
-/// Search targets for .loadenv.sh: ancestors of the CWD → ancestors of the
-/// executable (deduplicated). The executable side also walks up to its ancestors
-/// so that running from target/release or any location can still find the
-/// configuration inside the repository.
-fn candidate_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(cwd) = env::current_dir() {
-        dirs.extend(cwd.ancestors().map(|p| p.to_path_buf()));
-    }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            dirs.extend(parent.ancestors().map(|p| p.to_path_buf()));
-        }
-    }
-    let mut seen: Vec<PathBuf> = Vec::new();
-    for dir in dirs {
-        if !seen.contains(&dir) {
-            seen.push(dir);
-        }
-    }
-    seen
+/// ~/.config/taskshoot
+///
+/// The same relative location is used on every platform. `dirs::config_dir()`
+/// would be more idiomatic per-OS, but it resolves to
+/// ~/Library/Application Support on macOS, which does not match the path this
+/// project documents. `dirs::home_dir()` is still needed over `$HOME` because
+/// Windows does not normally set that variable.
+fn config_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("cannot determine the home directory")?;
+    Ok(home.join(".config").join("taskshoot"))
 }
 
-/// Find the first .loadenv.sh containing a getter line (does not execute it).
-fn discover_loadenv_candidate() -> Result<Option<PathBuf>> {
-    for dir in candidate_dirs() {
-        let candidate = dir.join(".loadenv.sh");
-        if candidate.is_file() {
-            let content = std::fs::read_to_string(&candidate)
-                .with_context(|| format!("cannot read {}", candidate.display()))?;
-            if extract_getter_line(&content).is_some() {
-                return Ok(Some(candidate));
-            }
-        }
+/// Prefer config.yml; fall back to config.yaml. When neither exists, return the
+/// config.yml path (the one `config init` would create).
+///
+/// Only one of the two is ever read. Reading both would silently merge a stale
+/// file left behind by a rename.
+fn config_path_in(dir: &Path) -> PathBuf {
+    let yml = dir.join("config.yml");
+    if yml.exists() {
+        return yml;
     }
-    Ok(None)
+    let yaml = dir.join("config.yaml");
+    if yaml.exists() {
+        return yaml;
+    }
+    yml
 }
 
-fn find_getter_command() -> Result<Option<String>> {
-    if let Some(cmd) = non_empty_env(GETTER_ENV) {
-        return Ok(Some(cmd));
-    }
-    let Some(candidate) = discover_loadenv_candidate()? else {
-        return Ok(None);
+/// Path of the config file that will actually be read.
+pub fn config_path() -> Result<PathBuf> {
+    Ok(config_path_in(&config_dir()?))
+}
+
+/// Restrict a config file to the owner. The file can hold a plaintext API key,
+/// but a file created with a default umask is world readable.
+#[cfg(unix)]
+fn tighten_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("cannot stat {}", path.display())),
     };
-    let candidate = std::fs::canonicalize(&candidate)
-        .with_context(|| format!("cannot resolve {}", candidate.display()))?;
-    let content = std::fs::read_to_string(&candidate)
-        .with_context(|| format!("cannot read {}", candidate.display()))?;
-    let Some(cmd) = extract_getter_line(&content) else {
-        return Ok(None);
-    };
-    // Like direnv's allow, a discovered getter command is only executed from an
-    // explicitly trusted file (prevents arbitrary command execution under a
-    // malicious repository).
-    if !is_trusted(&candidate, &content) {
-        eprintln!(
-            "taskshoot: found {} but it is not trusted; run `taskshoot trust {}` \
-             to allow executing its getter command",
-            candidate.display(),
-            candidate.display()
-        );
-        return Ok(None);
-    }
-    eprintln!("taskshoot: using {GETTER_ENV} from {}", candidate.display());
-    Ok(Some(cmd))
-}
-
-fn trust_file_path() -> Option<PathBuf> {
-    env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join(".config")
-            .join("taskshoot")
-            .join("trusted-loadenv")
-    })
-}
-
-fn sha256_hex(content: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-/// Line format of the trust file: `<sha256> <absolute path>`.
-/// If the file contents change, the hash mismatch requires re-trusting.
-fn is_trusted_entry(trust_content: &str, path: &Path, sha: &str) -> bool {
-    trust_content.lines().any(|line| {
-        line.trim()
-            .split_once(' ')
-            .is_some_and(|(hash, entry_path)| hash == sha && Path::new(entry_path.trim()) == path)
-    })
-}
-
-fn is_trusted(path: &Path, content: &str) -> bool {
-    let Some(trust_path) = trust_file_path() else {
-        return false;
-    };
-    let Ok(trust_content) = std::fs::read_to_string(&trust_path) else {
-        return false;
-    };
-    is_trusted_entry(&trust_content, path, &sha256_hex(content))
-}
-
-/// If the env setup lets us **assert** that trust is unnecessary, return the
-/// variable name that justifies it. Trust is a mechanism specific to the
-/// ".loadenv.sh search path" (resolution order 3), so it is only safe to say
-/// "unnecessary" for setups where the search is guaranteed not to run.
-fn external_auth_env() -> Option<&'static str> {
-    external_auth_env_with(non_empty_env)
-}
-
-/// Made injectable for env lookups so it can be tested without mutating the
-/// global env (tests run in parallel, so set_var would race).
-fn external_auth_env_with(lookup: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
-    // If GETTER_ENV is set, find_getter_command returns immediately, so the search never runs.
-    if lookup(GETTER_ENV).is_some() {
-        return Some(GETTER_ENV);
-    }
-    // The key alone is not enough: when `need_org && org_unresolved`, resolve()
-    // enters the getter search to obtain the org (org-scoped commands need the
-    // .loadenv.sh trust). Only when the org is also resolved from env can we
-    // assert the search will not run.
-    // (It also won't run with --org, but trust runs before config resolution, so
-    //  we only look at env here. We err toward narrowing the check rather than
-    //  wrongly claiming "unnecessary".)
-    if lookup("TASKSHOOT_API_KEY").is_some() && lookup("TASKSHOOT_CLI_ORGANIZATION").is_some() {
-        return Some("TASKSHOOT_API_KEY");
-    }
-    None
-}
-
-/// Guidance for when a bare `taskshoot trust` finds no candidate at all.
-/// If auth is already configured via env, "trust is unnecessary" is not an
-/// error, so we explain why and exit successfully instead of erroring.
-fn report_no_loadenv_candidate() -> Result<()> {
-    // Never print env "values" (variable names only). Avoids leaking credentials.
-    if let Some(source) = external_auth_env() {
-        println!(
-            "nothing to trust: no .loadenv.sh was found, and none is needed \
-             because {source} is already set in the environment."
-        );
-        println!(
-            "`taskshoot trust` only authorizes a discovered .loadenv.sh, which \
-             is the lowest-precedence way to supply credentials. Your setup \
-             uses a higher-precedence one, so the .loadenv.sh search never runs."
-        );
+    // Only touch regular files. Setting 600 on a directory would drop the
+    // owner's search bit and make everything below it unreachable.
+    if !meta.is_file() {
         return Ok(());
     }
-
-    let searched = candidate_dirs()
-        .iter()
-        .map(|dir| format!("  {}", dir.join(".loadenv.sh").display()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    bail!(
-        "no .loadenv.sh exporting {GETTER_ENV} was found.\n\n\
-         `taskshoot trust` authorizes an existing .loadenv.sh to run its getter \
-         command (direnv-style allow); it does not create one. You only need it \
-         when credentials come from a discovered .loadenv.sh -- setting \
-         {GETTER_ENV} (or both TASKSHOOT_API_KEY and TASKSHOOT_CLI_ORGANIZATION) \
-         in the environment instead makes trust unnecessary.\n\n\
-         Searched (ancestors of the current directory, then of the executable):\n\
-         {searched}\n\n\
-         Pass an explicit path to trust a file outside these locations: \
-         `taskshoot trust <path>`"
-    )
-}
-
-/// `taskshoot trust [path]`: authorize a .loadenv.sh to run its getter
-/// (equivalent to direnv allow). When path is omitted, targets the first
-/// candidate discovered from the current directory.
-pub fn trust_loadenv(path: Option<PathBuf>) -> Result<()> {
-    let path = match path {
-        Some(path) => path,
-        None => match discover_loadenv_candidate()? {
-            Some(candidate) => candidate,
-            None => return report_no_loadenv_candidate(),
-        },
-    };
-    let path = std::fs::canonicalize(&path)
-        .with_context(|| format!("cannot resolve {}", path.display()))?;
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
-    let cmd = extract_getter_line(&content)
-        .with_context(|| format!("{} does not export {GETTER_ENV}", path.display()))?;
-    let sha = sha256_hex(&content);
-    let trust_path = trust_file_path().context("HOME is not set")?;
-    if let Some(parent) = trust_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if meta.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("cannot restrict permissions of {}", path.display()))?;
     }
-    let existing = std::fs::read_to_string(&trust_path).unwrap_or_default();
-    if is_trusted_entry(&existing, &path, &sha) {
-        println!("already trusted: {}", path.display());
-        return Ok(());
-    }
-    // Replace any older hash line for the same path
-    let mut lines: Vec<String> = existing
-        .lines()
-        .filter(|line| {
-            line.trim()
-                .split_once(' ')
-                .map(|(_, entry_path)| Path::new(entry_path.trim()) != path)
-                .unwrap_or(true)
-        })
-        .map(str::to_string)
-        .collect();
-    lines.push(format!("{sha} {}", path.display()));
-    std::fs::write(&trust_path, lines.join("\n") + "\n")?;
-    println!("trusted: {}", path.display());
-    println!("getter command: {cmd}");
     Ok(())
 }
 
-/// Extract only the `export TASKSHOOT_CLI_ENV_GETTER_COMMAND=...` line from a
-/// .loadenv.sh. Does not shell-execute the whole file (avoids arbitrary code
-/// execution). A quoted value is read up to its closing quote; an unquoted value
-/// ignores everything from `#` onward (an inline comment).
-pub fn extract_getter_line(content: &str) -> Option<String> {
-    let prefix = format!("{GETTER_ENV}=");
-    for line in content.lines() {
-        let line = line.trim();
-        let rest = line.strip_prefix("export ").unwrap_or(line);
-        if let Some(value) = rest.strip_prefix(&prefix) {
-            let value = value.trim();
-            let extracted = if let Some(inner) = value.strip_prefix('\'') {
-                inner.split('\'').next()
-            } else if let Some(inner) = value.strip_prefix('"') {
-                inner.split('"').next()
-            } else {
-                value.split('#').next().map(str::trim)
-            };
-            if let Some(extracted) = extracted {
-                if !extracted.is_empty() {
-                    return Some(extracted.to_string());
-                }
+#[cfg(not(unix))]
+fn tighten_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Read the config file. A missing file is not an error: credentials may come
+/// from the environment instead.
+///
+/// Only an absent file counts as "nothing configured". `Path::exists()` would
+/// report the same for an unreadable directory, and the command would then fall
+/// back to defaults — the production API origin among them — without a word.
+fn load_local_config(path: &Path) -> Result<Mapping> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Mapping::new()),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    tighten_permissions(path)?;
+    parse_mapping(&text, &path.display().to_string(), true)
+}
+
+/// Read the config file and merge the YAML produced by its
+/// `config_override_command` over it.
+fn load_merged_config() -> Result<Mapping> {
+    let path = config_path()?;
+    let mut doc = load_local_config(&path)?;
+    let Some(cmd) = override_command(&doc)? else {
+        return Ok(doc);
+    };
+    let stdout = run_override_command(&cmd)?;
+    let overrides = parse_mapping(&stdout, &format!("{OVERRIDE_COMMAND_KEY}: {cmd}"), false)?;
+    merge_mapping(&mut doc, &overrides);
+    // The fetched YAML is not re-expanded, so an override command it carries is
+    // never run. Put the local one back, both to discard the fetched value and
+    // to keep `config show` able to display what actually ran.
+    doc.insert(
+        Value::String(OVERRIDE_COMMAND_KEY.into()),
+        Value::String(cmd),
+    );
+    Ok(doc)
+}
+
+/// `null_is_empty` distinguishes the two callers. A config file holding only
+/// comments parses as null and legitimately means "nothing set here", but the
+/// same output from the override command means the helper produced nothing
+/// usable — accepting it would leave stale local values in place while looking
+/// like the fetch succeeded.
+fn parse_mapping(text: &str, source: &str, null_is_empty: bool) -> Result<Mapping> {
+    let value: Value = serde_yaml::from_str(text)
+        .with_context(|| format!("failed to parse YAML from {source}"))?;
+    match value {
+        Value::Null if null_is_empty => Ok(Mapping::new()),
+        Value::Mapping(mapping) => Ok(mapping),
+        _ => bail!("{source} is not a YAML mapping"),
+    }
+}
+
+/// Merge `over` into `base`, with `over` winning. Only mappings are merged
+/// recursively; scalars and sequences are replaced wholesale, because sequence
+/// elements have no stable identity to merge on.
+fn merge_mapping(base: &mut Mapping, over: &Mapping) {
+    for (key, over_value) in over {
+        match (base.get_mut(key), over_value) {
+            (Some(Value::Mapping(base_map)), Value::Mapping(over_map)) => {
+                merge_mapping(base_map, over_map);
+            }
+            _ => {
+                base.insert(key.clone(), over_value.clone());
             }
         }
     }
-    None
 }
 
-fn strip_quotes(s: &str) -> &str {
-    let b = s.as_bytes();
-    if b.len() >= 2
-        && ((b[0] == b'\'' && b[b.len() - 1] == b'\'') || (b[0] == b'"' && b[b.len() - 1] == b'"'))
-    {
-        &s[1..s.len() - 1]
-    } else {
-        s
+/// Read a string value. A key that exists but is not a usable string is an
+/// error rather than a silent "unset": treating a typo as absent would fall
+/// back to a different credential without telling anyone.
+fn doc_str(doc: &Mapping, key: &str) -> Result<Option<String>> {
+    let Some(value) = doc.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
     }
+    let text = value
+        .as_str()
+        .with_context(|| format!("`{key}` in the config must be a string"))?
+        .trim();
+    Ok((!text.is_empty()).then(|| text.to_string()))
+}
+
+fn override_command(doc: &Mapping) -> Result<Option<String>> {
+    doc_str(doc, OVERRIDE_COMMAND_KEY)
 }
 
 fn spawn_reader<R: Read + Send + 'static>(mut reader: R) -> JoinHandle<String> {
@@ -330,36 +303,42 @@ fn spawn_reader<R: Read + Send + 'static>(mut reader: R) -> JoinHandle<String> {
     })
 }
 
-/// Run the getter command without going through a shell (shlex split + direct
-/// spawn). Shell metacharacters are not interpreted, so there is no room for
-/// command injection. stdout/stderr are collected on separate threads (avoids a
-/// wait deadlock from a clogged pipe). An API key already in env is not passed to
-/// the getter child process (prevents the key from being read via a discovered
-/// .loadenv.sh's command).
-fn run_getter_command(cmd: &str) -> Result<HashMap<String, String>> {
-    let argv =
-        shlex::split(cmd).with_context(|| format!("invalid getter command quoting: {cmd}"))?;
+/// Run `config_override_command` and return its stdout.
+///
+/// The command is split with shlex and spawned directly, so no shell is
+/// involved and shell metacharacters (pipes, redirects, substitutions) are not
+/// interpreted. stdout and stderr are drained on separate threads to avoid a
+/// deadlock on a full pipe. An API key already present in the environment is
+/// withheld from the child so that the command cannot read it back.
+fn run_override_command(cmd: &str) -> Result<String> {
+    let argv = shlex::split(cmd)
+        .with_context(|| format!("invalid {OVERRIDE_COMMAND_KEY} quoting: {cmd}"))?;
     if argv.is_empty() {
-        bail!("getter command is empty");
+        bail!("{OVERRIDE_COMMAND_KEY} is empty");
     }
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
+        // Withhold the key under both the current and the pre-0.2.0 name. A
+        // setup mid-migration still has the old one exported, and the helper
+        // (or its diagnostics) must not be able to read the credential back.
+        .env_remove("TASKSHOOT_CLI_API_KEY")
         .env_remove("TASKSHOOT_API_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("failed to run getter command: {}", argv[0]))?;
+        .with_context(|| format!("failed to run {OVERRIDE_COMMAND_KEY}: {}", argv[0]))?;
     let stdout_reader = child.stdout.take().map(spawn_reader);
     let stderr_reader = child.stderr.take().map(spawn_reader);
-    let status = match child.wait_timeout(GETTER_TIMEOUT)? {
+    let status = match child.wait_timeout(OVERRIDE_TIMEOUT)? {
         Some(status) => status,
         None => {
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "getter command timed out after {}s: {cmd}",
-                GETTER_TIMEOUT.as_secs()
+                "{OVERRIDE_COMMAND_KEY} timed out after {}s: {cmd} \
+                 (it may be waiting on an authentication prompt)",
+                OVERRIDE_TIMEOUT.as_secs()
             );
         }
     };
@@ -372,157 +351,274 @@ fn run_getter_command(cmd: &str) -> Result<HashMap<String, String>> {
             .unwrap_or_default();
         let brief: String = stderr.chars().take(300).collect();
         bail!(
-            "getter command failed (exit {:?}): {}",
+            "{OVERRIDE_COMMAND_KEY} failed (exit {:?}): {cmd}\n{}",
             status.code(),
             brief.trim()
         );
     }
-    let vars = parse_env_file(&stdout);
-    if vars.is_empty() {
-        bail!("getter command produced no KEY=VALUE output");
+    if stdout.trim().is_empty() {
+        bail!("{OVERRIDE_COMMAND_KEY} produced no output: {cmd}");
     }
-    Ok(vars)
+    Ok(stdout)
 }
 
-/// Parse env-file format (KEY=VALUE, `#` comment lines, optional `export ` prefix).
-pub fn parse_env_file(content: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                continue;
-            }
-            map.insert(key.to_string(), strip_quotes(value.trim()).to_string());
-        }
+/// Guidance for the case where no API key could be resolved. Setups migrating
+/// from the removed .loadenv.sh mechanism get a pointer to what replaced it.
+fn missing_api_key_message() -> Result<String> {
+    let path = config_path()?;
+    let mut message = format!(
+        "no API key found.\n\n\
+         Set TASKSHOOT_CLI_API_KEY in the environment, or write `api_key:` in\n\
+         {}\n\
+         Run `taskshoot config init` to create that file.",
+        path.display()
+    );
+    if let Some(legacy) = legacy_setup_hint() {
+        message.push_str("\n\n");
+        message.push_str(&legacy);
     }
-    map
+    Ok(message)
+}
+
+/// Detect a pre-0.2.0 setup that is no longer read.
+///
+/// Only the environment is inspected. An earlier version also scanned every
+/// ancestor of the current directory for a `.loadenv.sh`, but that put a file
+/// read back under the control of whatever checkout the CLI was invoked in —
+/// the very exposure that dropping `.loadenv.sh` discovery was meant to end.
+/// A hint is not worth that, and anyone still holding one gets told by the
+/// missing-key error and the migration notes.
+fn legacy_setup_hint() -> Option<String> {
+    env::var_os(LEGACY_GETTER_ENV).is_some().then(|| {
+        format!(
+            "{LEGACY_GETTER_ENV} is set but is no longer supported. \
+             Move the command to `{OVERRIDE_COMMAND_KEY}:` in the config file; \
+             it must now print YAML instead of KEY=VALUE lines. \
+             `.loadenv.sh` discovery and `taskshoot trust` have been removed."
+        )
+    })
+}
+
+/// `taskshoot config path`
+///
+/// stdout carries the bare path so that `$(taskshoot config path)` can be fed
+/// straight to an editor or a file operation; the "not created yet" note goes
+/// to stderr rather than corrupting that value.
+pub fn print_config_path() -> Result<()> {
+    let path = config_path()?;
+    println!("{}", path.display());
+    if !path.exists() {
+        eprintln!("taskshoot: not created yet; run `taskshoot config init`");
+    }
+    Ok(())
+}
+
+/// `taskshoot config init`
+pub fn init_config() -> Result<()> {
+    let dir = config_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let path = config_path_in(&dir);
+    if path.exists() {
+        tighten_permissions(&path)?;
+        println!("already exists: {}", path.display());
+        return Ok(());
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .with_context(|| format!("cannot create {}", path.display()))?;
+    file.write_all(CONFIG_TEMPLATE.as_bytes())
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    println!("created: {}", path.display());
+    Ok(())
+}
+
+/// `taskshoot config show` — the merged configuration, with the API key masked.
+pub fn show_config(json: bool) -> Result<()> {
+    let mut doc = load_merged_config()?;
+    if let Some(api_key) = doc.get_mut("api_key") {
+        *api_key = match api_key {
+            Value::String(key) => Value::String(mask_secret(key)),
+            // A wrongly shaped value is exactly what this command gets run to
+            // diagnose, so it must not be the one thing that prints verbatim.
+            _ => Value::String("<hidden: api_key is not a string>".into()),
+        };
+    }
+    let value = Value::Mapping(doc);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        print!("{}", serde_yaml::to_string(&value)?);
+    }
+    Ok(())
+}
+
+/// Keep enough of a secret to tell two keys apart, without printing a usable one.
+fn mask_secret(secret: &str) -> String {
+    let chars: Vec<char> = secret.chars().collect();
+    if chars.len() < 12 {
+        return "***".to_string();
+    }
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}...{tail}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_env_file_basic() {
-        let vars = parse_env_file(
-            "# comment\n\
-             TASKSHOOT_CLI_ORGANIZATION=cyberneura\n\
-             \n\
-             TASKSHOOT_API_KEY=tssk-abc123\n",
-        );
-        assert_eq!(vars["TASKSHOOT_CLI_ORGANIZATION"], "cyberneura");
-        assert_eq!(vars["TASKSHOOT_API_KEY"], "tssk-abc123");
-        assert_eq!(vars.len(), 2);
+    fn mapping(yaml: &str) -> Mapping {
+        parse_mapping(yaml, "test", true).unwrap()
     }
 
     #[test]
-    fn parse_env_file_export_and_quotes() {
-        let vars = parse_env_file(
-            "export A=\"double quoted\"\n\
-             B='single quoted'\n\
-             C=plain # not stripped as comment\n",
-        );
-        assert_eq!(vars["A"], "double quoted");
-        assert_eq!(vars["B"], "single quoted");
-        assert_eq!(vars["C"], "plain # not stripped as comment");
+    fn parse_mapping_accepts_comment_only_file() {
+        assert!(mapping("# nothing here\n").is_empty());
+        assert!(mapping("").is_empty());
     }
 
     #[test]
-    fn parse_env_file_skips_invalid_keys() {
-        let vars = parse_env_file("BAD KEY=1\n=novalue\nOK_1=yes\n");
-        assert_eq!(vars.len(), 1);
-        assert_eq!(vars["OK_1"], "yes");
+    fn parse_mapping_rejects_null_from_the_override_command() {
+        // A helper that produced nothing usable must fail rather than leave the
+        // local values in place while looking like the fetch succeeded
+        for text in ["null\n", "~\n", "# not found\n", ""] {
+            assert!(
+                parse_mapping(text, "test", false).is_err(),
+                "override output {text:?} should be rejected"
+            );
+            assert!(parse_mapping(text, "test", true).is_ok());
+        }
     }
 
     #[test]
-    fn extract_getter_line_variants() {
-        let sh = "#!/bin/sh\n\
-                  export TASKSHOOT_CLI_ENV_GETTER_COMMAND='op read \"op://development/taskshoot/cli\"'\n";
-        assert_eq!(
-            extract_getter_line(sh).as_deref(),
-            Some("op read \"op://development/taskshoot/cli\"")
-        );
-        assert_eq!(extract_getter_line("export OTHER=1\n"), None);
-        // The `export` prefix is optional and double quotes are also allowed
-        let sh2 = "TASKSHOOT_CLI_ENV_GETTER_COMMAND=\"echo X=1\"\n";
-        assert_eq!(extract_getter_line(sh2).as_deref(), Some("echo X=1"));
+    fn parse_mapping_rejects_non_mapping() {
+        assert!(parse_mapping("- a\n- b\n", "test", true).is_err());
+        assert!(parse_mapping("api_key: [\n", "test", true).is_err());
     }
 
     #[test]
-    fn external_auth_env_detects_trust_free_setups() {
-        // Nothing in env = the .loadenv.sh path is needed → trust is meaningful
-        assert_eq!(external_auth_env_with(|_| None), None);
-        // The getter is exported externally (a wrapper / shell profile) → the
-        // search is always skipped, so trust is unnecessary
-        assert_eq!(
-            external_auth_env_with(|name| (name == GETTER_ENV).then(|| "cat env".to_string())),
-            Some(GETTER_ENV)
+    fn merge_prefers_override_and_recurses_into_mappings() {
+        let mut base = mapping("api_key: local\napi_origin: http://127.0.0.1:8008\n");
+        merge_mapping(
+            &mut base,
+            &mapping("api_key: fetched\norganization: acme\n"),
         );
-        // With both the key and org present, the search does not run → trust unnecessary
+        assert_eq!(doc_str(&base, "api_key").unwrap().unwrap(), "fetched");
+        assert_eq!(doc_str(&base, "organization").unwrap().unwrap(), "acme");
+        // Untouched keys survive the merge
         assert_eq!(
-            external_auth_env_with(|name| matches!(
-                name,
-                "TASKSHOOT_API_KEY" | "TASKSHOOT_CLI_ORGANIZATION"
-            )
-            .then(|| "set".to_string())),
-            Some("TASKSHOOT_API_KEY")
+            doc_str(&base, "api_origin").unwrap().unwrap(),
+            "http://127.0.0.1:8008"
         );
-        // Key-only with org unresolved cannot be asserted "unnecessary": org-scoped
-        // commands search .loadenv.sh to obtain the org (resolve's need_org branch).
-        assert_eq!(
-            external_auth_env_with(
-                |name| (name == "TASKSHOOT_API_KEY").then(|| "tssk-dummy".to_string())
-            ),
-            None
-        );
-        // With the getter set, the search does not run even if org is unresolved (GETTER_ENV wins)
-        assert_eq!(
-            external_auth_env_with(|name| (name == GETTER_ENV).then(|| "cat env".to_string())),
-            Some(GETTER_ENV)
-        );
+
+        let mut nested = mapping("outer:\n  keep: old\n  replace: old\n");
+        merge_mapping(&mut nested, &mapping("outer:\n  replace: new\n"));
+        let outer = nested.get("outer").unwrap().as_mapping().unwrap();
+        assert_eq!(doc_str(outer, "keep").unwrap().unwrap(), "old");
+        assert_eq!(doc_str(outer, "replace").unwrap().unwrap(), "new");
     }
 
     #[test]
-    fn trust_entry_matches_hash_and_path() {
-        let sha = sha256_hex("export X=1\n");
-        let trust = format!("{sha} /home/user/proj/.loadenv.sh\n");
-        assert!(is_trusted_entry(
-            &trust,
-            Path::new("/home/user/proj/.loadenv.sh"),
-            &sha
-        ));
-        // Path mismatch
-        assert!(!is_trusted_entry(
-            &trust,
-            Path::new("/home/user/other/.loadenv.sh"),
-            &sha
-        ));
-        // Contents changed (hash mismatch) → not trusted
-        assert!(!is_trusted_entry(
-            &trust,
-            Path::new("/home/user/proj/.loadenv.sh"),
-            &sha256_hex("export X=2\n")
-        ));
-        assert!(!is_trusted_entry("", Path::new("/a"), &sha));
+    fn merge_replaces_sequences_wholesale() {
+        let mut base = mapping("items:\n  - a\n  - b\n");
+        merge_mapping(&mut base, &mapping("items:\n  - c\n"));
+        let items = base.get("items").unwrap().as_sequence().unwrap();
+        assert_eq!(items.len(), 1);
     }
 
     #[test]
-    fn extract_getter_line_ignores_trailing_comment() {
-        let quoted = "export TASKSHOOT_CLI_ENV_GETTER_COMMAND='op read \"op://x/y\"' # 1Password\n";
+    fn doc_str_treats_blank_and_null_as_unset() {
+        let doc = mapping("blank: '   '\nnothing: ~\nvalue: ok\n");
+        assert_eq!(doc_str(&doc, "blank").unwrap(), None);
+        assert_eq!(doc_str(&doc, "nothing").unwrap(), None);
+        assert_eq!(doc_str(&doc, "missing").unwrap(), None);
+        assert_eq!(doc_str(&doc, "value").unwrap().unwrap(), "ok");
+    }
+
+    #[test]
+    fn doc_str_rejects_non_string() {
+        let doc = mapping("api_key: 12345\n");
+        assert!(doc_str(&doc, "api_key").is_err());
+    }
+
+    #[test]
+    fn override_command_is_read_as_a_string() {
+        let doc = mapping("config_override_command: op read \"op://x/y\"\n");
         assert_eq!(
-            extract_getter_line(quoted).as_deref(),
-            Some("op read \"op://x/y\"")
+            override_command(&doc).unwrap().unwrap(),
+            "op read \"op://x/y\""
         );
-        let unquoted = "TASKSHOOT_CLI_ENV_GETTER_COMMAND=my-getter --json # comment\n";
+        assert_eq!(override_command(&mapping("api_key: k\n")).unwrap(), None);
+        assert!(override_command(&mapping("config_override_command: []\n")).is_err());
+    }
+
+    #[test]
+    fn or_from_config_ignores_a_shadowed_bad_value() {
+        let doc = mapping("api_key: 12345\n");
+        // A higher-precedence source wins without the file value being parsed
         assert_eq!(
-            extract_getter_line(unquoted).as_deref(),
-            Some("my-getter --json")
+            or_from_config(Some("from-env".into()), &doc, "api_key")
+                .unwrap()
+                .unwrap(),
+            "from-env"
         );
+        // The same bad value is still reported when it is the one being used
+        assert!(or_from_config(None, &doc, "api_key").is_err());
+    }
+
+    #[test]
+    fn config_is_needed_only_skips_when_nothing_could_change() {
+        // Every value already resolved: the file cannot contribute
+        assert!(!config_is_needed(true, true, true, true));
+        // me / orgs / notifications need no org, so the org is irrelevant
+        assert!(!config_is_needed(false, true, true, false));
+
+        // Any missing piece means the file must be read
+        assert!(config_is_needed(true, false, true, true)); // no key
+        assert!(config_is_needed(true, true, false, true)); // no origin
+        assert!(config_is_needed(true, true, true, false)); // org still unresolved
+        assert!(config_is_needed(false, true, false, true)); // no origin, org not needed
+        assert!(config_is_needed(false, false, true, true)); // no key, org not needed
+        assert!(config_is_needed(true, false, false, false));
+    }
+
+    #[test]
+    fn config_path_prefers_yml_over_yaml() {
+        let dir = std::env::temp_dir().join(format!("taskshoot-cfg-{}", std::process::id()));
+        // Start clean: a directory left behind by an earlier panic would make
+        // the "neither file exists" assertion below fail.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Neither file present: the path `config init` would create
+        assert_eq!(config_path_in(&dir), dir.join("config.yml"));
+
+        std::fs::write(dir.join("config.yaml"), "").unwrap();
+        assert_eq!(config_path_in(&dir), dir.join("config.yaml"));
+
+        std::fs::write(dir.join("config.yml"), "").unwrap();
+        assert_eq!(config_path_in(&dir), dir.join("config.yml"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mask_secret_keeps_only_the_edges() {
+        assert_eq!(mask_secret("tssk-abcdefghijkl"), "tssk...ijkl");
+        assert_eq!(mask_secret("short"), "***");
     }
 }
