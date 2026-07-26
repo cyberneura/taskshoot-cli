@@ -240,6 +240,24 @@ impl Api {
         self.get(&self.project_path(project, "task-categories/")?)
     }
 
+    /// Create a task category. Requires the manager role or higher.
+    pub fn create_task_category(&self, project: &str, body: &Value) -> Result<Value> {
+        self.post(&self.project_path(project, "task-categories/")?, body)
+    }
+
+    /// Update a task category. Requires the manager role or higher.
+    pub fn patch_task_category(
+        &self,
+        project: &str,
+        category_id: &str,
+        body: &Value,
+    ) -> Result<Value> {
+        self.patch(
+            &self.project_path(project, &format!("task-categories/{}", enc(category_id)))?,
+            body,
+        )
+    }
+
     pub fn assignable_users(&self, project: &str) -> Result<Value> {
         self.get(&self.project_path(project, "assignable-users/")?)
     }

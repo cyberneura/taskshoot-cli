@@ -6,6 +6,7 @@ mod output;
 mod stages;
 mod taskref;
 
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -53,6 +54,9 @@ enum Cmd {
         #[arg(long)]
         project: String,
     },
+    /// Create / update a task category (requires the manager role or higher)
+    #[command(subcommand)]
+    Category(CategoryCmd),
     /// List tasks in a project
     Tasks {
         #[arg(long)]
@@ -149,6 +153,50 @@ enum NotificationsCmd {
         /// Mark all unread notifications as read
         #[arg(long)]
         all: bool,
+    },
+}
+
+/// The server stores `ordering` in a PositiveIntegerField, i.e. a PostgreSQL `integer`
+/// with a `>= 0` check, so anything above 2^31-1 fails in the database rather than
+/// in the API layer.
+const ORDERING_RANGE: RangeInclusive<i64> = 0..=2_147_483_647;
+
+#[derive(Subcommand)]
+enum CategoryCmd {
+    /// Create a task category in a project
+    Create {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        name: String,
+        /// Free-form color label used by the web UI (e.g. red)
+        #[arg(long)]
+        color: Option<String>,
+        /// Sort order in the category list (smaller comes first)
+        #[arg(long, value_parser = ORDERING_RANGE)]
+        ordering: Option<u32>,
+        /// Create it hidden from the task form (can be re-enabled with
+        /// `category update --active true`)
+        #[arg(long)]
+        inactive: bool,
+    },
+    /// Update a task category (name, color, ordering or active state)
+    Update {
+        /// Existing category: name (case-insensitive) or id
+        category: String,
+        #[arg(long)]
+        project: String,
+        /// New name
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        color: Option<String>,
+        #[arg(long, value_parser = ORDERING_RANGE)]
+        ordering: Option<u32>,
+        /// Show (true) or hide (false) the category in the task form.
+        /// Hiding keeps it on the tasks that already use it.
+        #[arg(long)]
+        active: Option<bool>,
     },
 }
 
@@ -328,6 +376,44 @@ fn run() -> Result<()> {
         Cmd::Projects => commands::projects(&api, json),
         Cmd::Workflows { project } => commands::workflows(&api, &project, json),
         Cmd::Categories { project } => commands::categories(&api, &project, json),
+        Cmd::Category(cmd) => match cmd {
+            CategoryCmd::Create {
+                project,
+                name,
+                color,
+                ordering,
+                inactive,
+            } => commands::category_create(
+                &api,
+                &commands::CategoryCreateArgs {
+                    project,
+                    name,
+                    color,
+                    ordering,
+                    inactive,
+                },
+                json,
+            ),
+            CategoryCmd::Update {
+                category,
+                project,
+                name,
+                color,
+                ordering,
+                active,
+            } => commands::category_update(
+                &api,
+                &commands::CategoryUpdateArgs {
+                    project,
+                    category,
+                    name,
+                    color,
+                    ordering,
+                    active,
+                },
+                json,
+            ),
+        },
         Cmd::Tasks {
             project,
             status,

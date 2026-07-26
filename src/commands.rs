@@ -234,23 +234,103 @@ pub fn categories(api: &Api, project: &str, json: bool) -> Result<()> {
     }
     let mut items: Vec<TaskCategory> = from_value(value)?;
     items.sort_by_key(|c| c.ordering);
-    let rows: Vec<Vec<String>> = items
-        .iter()
-        .map(|c| {
-            vec![
-                c.id.clone(),
-                c.name.clone(),
-                c.color.clone(),
-                if c.active {
-                    "active".to_string()
-                } else {
-                    "inactive".to_string()
-                },
-            ]
-        })
-        .collect();
-    print_table(&["ID", "NAME", "COLOR", "STATE"], &rows);
+    let rows: Vec<Vec<String>> = items.iter().map(category_row).collect();
+    print_table(&CATEGORY_COLUMNS, &rows);
     Ok(())
+}
+
+const CATEGORY_COLUMNS: [&str; 5] = ["ID", "NAME", "COLOR", "ORDERING", "STATE"];
+
+fn category_row(category: &TaskCategory) -> Vec<String> {
+    vec![
+        category.id.clone(),
+        category.name.clone(),
+        category.color.clone(),
+        category.ordering.to_string(),
+        if category.active {
+            "active"
+        } else {
+            "inactive"
+        }
+        .to_string(),
+    ]
+}
+
+/// Print one category (used after create / update).
+fn print_category(value: &Value, json: bool) -> Result<()> {
+    if json {
+        return print_json(value);
+    }
+    let category: TaskCategory = from_value(value.clone())?;
+    print_table(&CATEGORY_COLUMNS, &[category_row(&category)]);
+    Ok(())
+}
+
+pub struct CategoryCreateArgs {
+    pub project: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub ordering: Option<u32>,
+    pub inactive: bool,
+}
+
+pub fn category_create(api: &Api, args: &CategoryCreateArgs, json: bool) -> Result<()> {
+    let name = args.name.trim();
+    if name.is_empty() {
+        bail!("--name is empty");
+    }
+    let mut body = Map::new();
+    body.insert("name".to_string(), json!(name));
+    if let Some(color) = &args.color {
+        body.insert("color".to_string(), json!(color));
+    }
+    if let Some(ordering) = args.ordering {
+        body.insert("ordering".to_string(), json!(ordering));
+    }
+    if args.inactive {
+        body.insert("active".to_string(), json!(false));
+    }
+    let value = api.create_task_category(&args.project, &Value::Object(body))?;
+    print_category(&value, json)
+}
+
+pub struct CategoryUpdateArgs {
+    pub project: String,
+    /// Existing category: name (case-insensitive) or id.
+    pub category: String,
+    pub name: Option<String>,
+    pub color: Option<String>,
+    pub ordering: Option<u32>,
+    pub active: Option<bool>,
+}
+
+pub fn category_update(api: &Api, args: &CategoryUpdateArgs, json: bool) -> Result<()> {
+    // Build (and validate) the body before resolving the category, so that a call with
+    // no field options fails locally instead of spending a category lookup first.
+    let mut body = Map::new();
+    if let Some(name) = &args.name {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("--name is empty");
+        }
+        body.insert("name".to_string(), json!(name));
+    }
+    if let Some(color) = &args.color {
+        body.insert("color".to_string(), json!(color));
+    }
+    if let Some(ordering) = args.ordering {
+        body.insert("ordering".to_string(), json!(ordering));
+    }
+    if let Some(active) = args.active {
+        body.insert("active".to_string(), json!(active));
+    }
+    if body.is_empty() {
+        bail!("nothing to update: pass --name, --color, --ordering or --active");
+    }
+    let category_id = resolve_category_id(api, &args.project, &args.category)?
+        .context("category is empty; specify a category name or id")?;
+    let value = api.patch_task_category(&args.project, &category_id, &Value::Object(body))?;
+    print_category(&value, json)
 }
 
 /// Resolve a category spec: UUID → as-is, otherwise match a category name in the
