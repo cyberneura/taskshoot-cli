@@ -6,10 +6,10 @@ mod output;
 mod stages;
 mod taskref;
 
-use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use clap::builder::RangedI64ValueParser;
 use clap::{Parser, Subcommand};
 
 /// Taskshoot task operations CLI.
@@ -159,7 +159,13 @@ enum NotificationsCmd {
 /// The server stores `ordering` in a PositiveIntegerField, i.e. a PostgreSQL `integer`
 /// with a `>= 0` check, so anything above 2^31-1 fails in the database rather than
 /// in the API layer.
-const ORDERING_RANGE: RangeInclusive<i64> = 0..=2_147_483_647;
+///
+/// The parser has to be built from `value_parser!(u32)` so that it yields the same
+/// type as the field it fills: clap does not convert between a parser's output type
+/// and the declared field type, it downcasts, and a mismatch panics at parse time.
+fn ordering_value_parser() -> RangedI64ValueParser<u32> {
+    clap::value_parser!(u32).range(0..=2_147_483_647)
+}
 
 #[derive(Subcommand)]
 enum CategoryCmd {
@@ -173,7 +179,7 @@ enum CategoryCmd {
         #[arg(long)]
         color: Option<String>,
         /// Sort order in the category list (smaller comes first)
-        #[arg(long, value_parser = ORDERING_RANGE)]
+        #[arg(long, value_parser = ordering_value_parser())]
         ordering: Option<u32>,
         /// Create it hidden from the task form (can be re-enabled with
         /// `category update --active true`)
@@ -191,7 +197,7 @@ enum CategoryCmd {
         name: Option<String>,
         #[arg(long)]
         color: Option<String>,
-        #[arg(long, value_parser = ORDERING_RANGE)]
+        #[arg(long, value_parser = ordering_value_parser())]
         ordering: Option<u32>,
         /// Show (true) or hide (false) the category in the task form.
         /// Hiding keeps it on the tasks that already use it.
@@ -559,5 +565,77 @@ fn run() -> Result<()> {
                 commands::notifications_read(&api, &ids, all, json)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn ordering_of(args: &[&str]) -> Option<u32> {
+        // Extracting the value is the point: a value_parser whose output type does not
+        // match the field type only panics here, not at definition time.
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Category(CategoryCmd::Create { ordering, .. })
+            | Cmd::Category(CategoryCmd::Update { ordering, .. }) => ordering,
+            _ => panic!("expected a category command"),
+        }
+    }
+
+    #[test]
+    fn category_ordering_parses_in_range_values() {
+        assert_eq!(
+            ordering_of(&[
+                "taskshoot",
+                "category",
+                "create",
+                "--project",
+                "DEV",
+                "--name",
+                "Bug",
+                "--ordering",
+                "5",
+            ]),
+            Some(5)
+        );
+        assert_eq!(
+            ordering_of(&[
+                "taskshoot",
+                "category",
+                "update",
+                "Bug",
+                "--project",
+                "DEV",
+                "--ordering",
+                "2147483647",
+            ]),
+            Some(2_147_483_647)
+        );
+    }
+
+    #[test]
+    fn category_ordering_rejects_out_of_range_values() {
+        for value in ["-1", "2147483648"] {
+            assert!(
+                Cli::try_parse_from([
+                    "taskshoot",
+                    "category",
+                    "create",
+                    "--project",
+                    "DEV",
+                    "--name",
+                    "Bug",
+                    &format!("--ordering={value}"),
+                ])
+                .is_err(),
+                "--ordering={value} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
     }
 }
