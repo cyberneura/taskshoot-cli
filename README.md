@@ -181,7 +181,11 @@ taskshoot me                                   # who am I (verify auth)
 taskshoot orgs                                 # organizations you can access (works with no org set)
 taskshoot projects                             # list projects
 taskshoot workflows --project DEV              # progress flows and stages (value / label / terminal)
-taskshoot categories --project DEV             # task categories (id / name)
+taskshoot categories --project DEV             # task categories (id / name / color / ordering / state)
+
+taskshoot category create --project DEV --name Bug --color red --ordering 5
+taskshoot category update Bug --project DEV --name Defect       # rename (name or id)
+taskshoot category update Defect --project DEV --active false   # hide from the task form
 
 taskshoot tasks --project DEV                  # list tasks
 taskshoot tasks --project DEV --status draft --assignee me
@@ -261,8 +265,18 @@ taskshoot notifications read --all             # mark all read
   name / display name / user id, same as `--assignee`. Matching follows the same rules as
   the web UI's mention rendering (handle_name, or a default handle derived from the email
   local part), and includes mentions of MentionGroups the user belongs to (`@dev-team`, …).
-- `--category` (create / update) takes a category name (case-insensitive) or id. List them
-  with `taskshoot categories --project <KEY>`. `update --category ""` clears it.
+- `--category` (task create / update) takes a category name (case-insensitive) or id. List
+  them with `taskshoot categories --project <KEY>`. `task update --category ""` clears it.
+- `category create` / `category update` manage the categories themselves and **require the
+  manager role or higher** (member returns `403 manager role required`). `category update`
+  takes a name (case-insensitive) or id as its positional argument, and needs at least one
+  of `--name` / `--color` / `--ordering` / `--active`. `--name` is truncated to 100 and
+  `--color` to 20 characters by the server, and `--ordering` must be between 0 and
+  2147483647.
+- The CLI intentionally has no `category delete`. The API does support deleting, but that
+  detaches the category from the tasks already using it, so hide it with
+  `category update <name> --active false` instead: it disappears from the task form while
+  staying on those tasks.
 - `me` / `orgs` / `notifications` work with no organization set
   (`TASKSHOOT_CLI_ORGANIZATION` unset); notifications are user-scoped and cross-org.
 - `search` searches across all projects in the organization (`/task-search/` API). The

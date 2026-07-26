@@ -87,7 +87,7 @@ taskshoot orgs    # organizations you can access (works with no org set)
 ```bash
 taskshoot projects                              # list projects
 taskshoot workflows --project DEV               # progress flows and stages (value / label / terminal)
-taskshoot categories --project DEV              # task categories (id / name)
+taskshoot categories --project DEV              # task categories (id / name / color / ordering / state)
 
 taskshoot tasks --project DEV                   # list tasks
 taskshoot tasks --project DEV --status draft --assignee me
@@ -125,6 +125,24 @@ taskshoot task cancel DEV-12 --reason "duplicate"
 taskshoot task resume DEV-12
 taskshoot task track <uuid> --project DEV          # untracked -> tracked (assigns a number)
 ```
+
+### Project categories (manager role or higher)
+
+```bash
+taskshoot category create --project DEV --name Bug --color red --ordering 5
+taskshoot category update Bug --project DEV --name Defect        # rename (name or id)
+taskshoot category update Defect --project DEV --active false    # hide from the task form
+```
+
+`category create` / `category update` change the project's category list itself (as opposed
+to `task update --category`, which only assigns one to a task). They **require the manager
+role or higher**; a member gets `403 manager role required`. `category update` needs at
+least one of `--name` / `--color` / `--ordering` / `--active`. The server truncates `--name`
+to 100 and `--color` to 20 characters, and `--ordering` must be between 0 and 2147483647.
+
+The CLI intentionally has no `category delete`: the API can delete, but that detaches the
+category from the tasks already using it. Use `--active false` instead, which hides it from
+the task form while keeping it on those tasks.
 
 ### Notifications (mention inbox)
 
