@@ -15,13 +15,18 @@ const OVERRIDE_COMMAND_KEY: &str = "config_override_command";
 const OVERRIDE_TIMEOUT: Duration = Duration::from_secs(120);
 // Removed in favour of the config file; only referenced to guide migration
 const LEGACY_GETTER_ENV: &str = "TASKSHOOT_CLI_ENV_GETTER_COMMAND";
+// Renamed so that every variable this CLI reads shares the TASKSHOOT_CLI_ prefix
+const RENAMED_ENV: [(&str, &str); 2] = [
+    ("TASKSHOOT_API_KEY", "TASKSHOOT_CLI_API_KEY"),
+    ("TASKSHOOT_API_ORIGIN", "TASKSHOOT_CLI_API_ORIGIN"),
+];
 
 const CONFIG_TEMPLATE: &str = r#"# Taskshoot CLI config file
 # https://github.com/cyberneura/taskshoot-cli
 #
 # Precedence: command line flags > environment variables > this file.
-# Environment variables: TASKSHOOT_API_KEY, TASKSHOOT_CLI_ORGANIZATION,
-# TASKSHOOT_API_ORIGIN.
+# Environment variables: TASKSHOOT_CLI_API_KEY, TASKSHOOT_CLI_ORGANIZATION,
+# TASKSHOOT_CLI_API_ORIGIN.
 
 # api_key: tssk-xxxxxxxxxxxx
 # organization: your-org-code-name
@@ -50,14 +55,14 @@ pub struct Config {
 
 /// Resolution order:
 /// 1. Command line flags (--org)
-/// 2. Environment variables (TASKSHOOT_API_KEY / TASKSHOOT_CLI_ORGANIZATION /
-///    TASKSHOOT_API_ORIGIN) — the CI / agent case
+/// 2. Environment variables (TASKSHOOT_CLI_API_KEY / TASKSHOOT_CLI_ORGANIZATION /
+///    TASKSHOOT_CLI_API_ORIGIN) — the CI / agent case
 /// 3. ~/.config/taskshoot/config.yml, with the YAML produced by its
 ///    `config_override_command` merged over it
 pub fn resolve(org_override: Option<String>, need_org: bool) -> Result<Config> {
-    let env_key = non_empty_env("TASKSHOOT_API_KEY");
+    let env_key = non_empty_env("TASKSHOOT_CLI_API_KEY");
     let env_org = non_empty_env("TASKSHOOT_CLI_ORGANIZATION");
-    let env_origin = non_empty_env("TASKSHOOT_API_ORIGIN");
+    let env_origin = non_empty_env("TASKSHOOT_CLI_API_ORIGIN");
 
     let doc = if config_is_needed(
         need_org,
@@ -70,15 +75,12 @@ pub fn resolve(org_override: Option<String>, need_org: bool) -> Result<Config> {
         Mapping::new()
     };
 
-    let api_key = match env_key.or(doc_str(&doc, "api_key")?) {
+    let api_key = match or_from_config(env_key, &doc, "api_key")? {
         Some(api_key) => api_key,
         None => bail!(missing_api_key_message()?),
     };
-    let organization = org_override
-        .or(env_org)
-        .or(doc_str(&doc, "organization")?);
-    let api_origin = env_origin
-        .or(doc_str(&doc, "api_origin")?)
+    let organization = or_from_config(org_override.or(env_org), &doc, "organization")?;
+    let api_origin = or_from_config(env_origin, &doc, "api_origin")?
         .unwrap_or_else(|| DEFAULT_API_ORIGIN.to_string());
 
     Ok(Config {
@@ -86,6 +88,31 @@ pub fn resolve(org_override: Option<String>, need_org: bool) -> Result<Config> {
         organization,
         api_key,
     })
+}
+
+/// Fall back to a config file value only when the higher-precedence source did
+/// not supply one.
+///
+/// `Option::or` would evaluate its argument eagerly, so a malformed value in
+/// the file would abort the command even though a flag or environment variable
+/// already shadowed it — the opposite of the documented precedence.
+fn or_from_config(resolved: Option<String>, doc: &Mapping, key: &str) -> Result<Option<String>> {
+    match resolved {
+        Some(value) => Ok(Some(value)),
+        None => doc_str(doc, key),
+    }
+}
+
+/// Warn about credentials left under the pre-0.2.0 variable names. Staying
+/// silent would let a stale variable look like it is in effect while the key
+/// actually comes from somewhere else. Called for every subcommand, including
+/// the `config` ones, since those are where the mismatch gets investigated.
+pub fn warn_about_renamed_env() {
+    for (old, new) in RENAMED_ENV {
+        if env::var_os(old).is_some() {
+            eprintln!("taskshoot: {old} is no longer read; it was renamed to {new}");
+        }
+    }
 }
 
 /// Whether the config file can still change the outcome.
@@ -107,9 +134,15 @@ fn non_empty_env(name: &str) -> Option<String> {
 }
 
 /// ~/.config/taskshoot
+///
+/// The same relative location is used on every platform. `dirs::config_dir()`
+/// would be more idiomatic per-OS, but it resolves to
+/// ~/Library/Application Support on macOS, which does not match the path this
+/// project documents. `dirs::home_dir()` is still needed over `$HOME` because
+/// Windows does not normally set that variable.
 fn config_dir() -> Result<PathBuf> {
-    let home = env::var_os("HOME").context("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".config").join("taskshoot"))
+    let home = dirs::home_dir().context("cannot determine the home directory")?;
+    Ok(home.join(".config").join("taskshoot"))
 }
 
 /// Prefer config.yml; fall back to config.yaml. When neither exists, return the
@@ -263,7 +296,7 @@ fn run_override_command(cmd: &str) -> Result<String> {
     }
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
-        .env_remove("TASKSHOOT_API_KEY")
+        .env_remove("TASKSHOOT_CLI_API_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -309,7 +342,7 @@ fn missing_api_key_message() -> Result<String> {
     let path = config_path()?;
     let mut message = format!(
         "no API key found.\n\n\
-         Set TASKSHOOT_API_KEY in the environment, or write `api_key:` in\n\
+         Set TASKSHOOT_CLI_API_KEY in the environment, or write `api_key:` in\n\
          {}\n\
          Run `taskshoot config init` to create that file.",
         path.display()
@@ -487,6 +520,20 @@ mod tests {
         );
         assert_eq!(override_command(&mapping("api_key: k\n")).unwrap(), None);
         assert!(override_command(&mapping("config_override_command: []\n")).is_err());
+    }
+
+    #[test]
+    fn or_from_config_ignores_a_shadowed_bad_value() {
+        let doc = mapping("api_key: 12345\n");
+        // A higher-precedence source wins without the file value being parsed
+        assert_eq!(
+            or_from_config(Some("from-env".into()), &doc, "api_key")
+                .unwrap()
+                .unwrap(),
+            "from-env"
+        );
+        // The same bad value is still reported when it is the one being used
+        assert!(or_from_config(None, &doc, "api_key").is_err());
     }
 
     #[test]

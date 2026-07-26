@@ -35,8 +35,8 @@ An API key (`tssk-...`) is required. It is issued from Taskshoot under
 The key and organization are resolved in this order:
 
 1. **Command line flags** — `--org` overrides the organization for one invocation.
-2. **Environment variables** — `TASKSHOOT_API_KEY`, `TASKSHOOT_CLI_ORGANIZATION`,
-   `TASKSHOOT_API_ORIGIN`. Use this for CI or an AI agent that passes credentials
+2. **Environment variables** — `TASKSHOOT_CLI_API_KEY`, `TASKSHOOT_CLI_ORGANIZATION`,
+   `TASKSHOOT_CLI_API_ORIGIN`. Use this for CI or an AI agent that passes credentials
    directly.
 3. **Config file** — `~/.config/taskshoot/config.yml` (`config.yaml` is the fallback),
    optionally overlaid with the YAML printed by its `config_override_command`.
@@ -63,12 +63,12 @@ Notes:
 
 - `config_override_command` runs on every invocation. If it prompts (Touch ID), wrap it
   in your own caching script.
-- The config file is skipped entirely when `TASKSHOOT_API_KEY`, `TASKSHOOT_API_ORIGIN`
+- The config file is skipped entirely when `TASKSHOOT_CLI_API_KEY`, `TASKSHOOT_CLI_API_ORIGIN`
   and the organization all come from flags or the environment. Set all three in a bot
   loop to keep the command from running.
 - `me` / `orgs` / `notifications` need no organization and work with the key alone.
 - The API endpoint defaults to `https://taskshoot-api.cyberneura.com`. Point at a local
-  dev server with `export TASKSHOOT_API_ORIGIN=http://127.0.0.1:8008` or `api_origin:`
+  dev server with `export TASKSHOOT_CLI_API_ORIGIN=http://127.0.0.1:8008` or `api_origin:`
   in the config file.
 - **Never print a raw API key to stdout or a transcript.** `taskshoot config show` masks
   it; a getter command's raw output does not.

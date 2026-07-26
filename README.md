@@ -65,8 +65,8 @@ enough to rotate it everywhere.
 The key and organization are resolved in this order of precedence:
 
 1. **Command line flags** — `--org` overrides the organization for a single invocation.
-2. **Environment variables** — `TASKSHOOT_API_KEY` / `TASKSHOOT_CLI_ORGANIZATION` /
-   `TASKSHOOT_API_ORIGIN`. Use this when CI or an AI agent passes credentials directly,
+2. **Environment variables** — `TASKSHOOT_CLI_API_KEY` / `TASKSHOOT_CLI_ORGANIZATION` /
+   `TASKSHOOT_CLI_API_ORIGIN`. Use this when CI or an AI agent passes credentials directly,
    or in any process where 1Password Touch ID approval is unavailable.
 3. **Config file** — `~/.config/taskshoot/config.yml`, optionally overlaid with the YAML
    printed by its `config_override_command`.
@@ -124,16 +124,30 @@ Notes:
 - A non-zero exit, empty output, or output that is not a YAML mapping is an error. The
   CLI never silently falls back to a different credential.
 - `config_override_command` in the fetched YAML is ignored — there is no second round.
-- The command does not inherit `TASKSHOOT_API_KEY` from the environment, so it cannot
+- The command does not inherit `TASKSHOOT_CLI_API_KEY` from the environment, so it cannot
   read back a key that is already set.
-- The config file is skipped entirely when `TASKSHOOT_API_KEY`, `TASKSHOOT_API_ORIGIN`
+- The config file is skipped entirely when `TASKSHOOT_CLI_API_KEY`, `TASKSHOOT_CLI_API_ORIGIN`
   and the organization all come from flags or the environment, since it could not
   contribute anything. Set all three to keep the command from running in a bot loop.
 
 ### Migrating from 0.1.0
 
-`.loadenv.sh` discovery, `TASKSHOOT_CLI_ENV_GETTER_COMMAND` and the `taskshoot trust`
-subcommand were removed in 0.2.0. Replace them with the config file:
+Two things changed in 0.2.0.
+
+**Environment variables were renamed** so that every variable this CLI reads shares the
+`TASKSHOOT_CLI_` prefix:
+
+| 0.1.0 | 0.2.0 |
+|---|---|
+| `TASKSHOOT_API_KEY` | `TASKSHOOT_CLI_API_KEY` |
+| `TASKSHOOT_API_ORIGIN` | `TASKSHOOT_CLI_API_ORIGIN` |
+| `TASKSHOOT_CLI_ORGANIZATION` | unchanged |
+
+The old names are not read. The CLI prints a notice on stderr when it sees one still set,
+so a stale variable cannot quietly look like it is in effect.
+
+**`.loadenv.sh` discovery, `TASKSHOOT_CLI_ENV_GETTER_COMMAND` and the `taskshoot trust`
+subcommand were removed.** Replace them with the config file:
 
 1. Run `taskshoot config init`.
 2. Move the getter command to `config_override_command:` in that file.
@@ -142,16 +156,13 @@ subcommand were removed in 0.2.0. Replace them with the config file:
    `TASKSHOOT_API_ORIGIN` becomes `api_origin`.
 4. Delete `~/.config/taskshoot/trusted-loadenv` and any leftover `.loadenv.sh`.
 
-The environment variables themselves are unchanged, so setups that export
-`TASKSHOOT_API_KEY` directly need no migration.
-
 ### API endpoint
 
 The default is `https://taskshoot-api.cyberneura.com`. To point at a local dev server,
 either export the variable or set `api_origin:` in the config file:
 
 ```bash
-export TASKSHOOT_API_ORIGIN=http://127.0.0.1:8008
+export TASKSHOOT_CLI_API_ORIGIN=http://127.0.0.1:8008
 ```
 
 ## Usage

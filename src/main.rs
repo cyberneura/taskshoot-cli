@@ -15,11 +15,11 @@ use clap::{Parser, Subcommand};
 ///
 /// Authentication (in order of precedence):
 /// 1. Command line flags (--org)
-/// 2. TASKSHOOT_API_KEY / TASKSHOOT_CLI_ORGANIZATION environment variables
+/// 2. TASKSHOOT_CLI_API_KEY / TASKSHOOT_CLI_ORGANIZATION environment variables
 /// 3. ~/.config/taskshoot/config.yml (see `taskshoot config init`), with the
 ///    YAML printed by its config_override_command merged over it
 ///
-/// TASKSHOOT_API_ORIGIN, or api_origin in the config file, overrides the API
+/// TASKSHOOT_CLI_API_ORIGIN, or api_origin in the config file, overrides the API
 /// origin (default: https://taskshoot-api.cyberneura.com; use
 /// http://127.0.0.1:8008 for local dev).
 #[derive(Parser)]
@@ -305,6 +305,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    config::warn_about_renamed_env();
     // The config subcommand must work before credentials resolve, since it is
     // what you reach for when they do not.
     if let Cmd::Config(config_cmd) = &cli.command {
