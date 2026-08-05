@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::api::{from_value, Api, TasksQuery};
 use crate::models::{
-    AssignableUser, Me, NotificationList, Org, Project, SearchResult, Task, TaskCategory,
-    TaskEvent, Workflow,
+    AssignableUser, Me, MentionCandidate, NotificationList, Org, OrgUser, Project, SearchResult,
+    Task, TaskCategory, TaskEvent, Workflow,
 };
 use crate::output::{print_table, truncate_width};
 use crate::stages;
@@ -181,6 +181,87 @@ pub fn projects(api: &Api, json: bool) -> Result<()> {
         })
         .collect();
     print_table(&["KEY", "NAME", "DEFAULT", "STATE"], &rows);
+    Ok(())
+}
+
+/// Organization users, taken from the mention candidates: the member list
+/// (`members/`) is admin-only, while this endpoint is readable by every role
+/// and fills in the same handle names that mentions use.
+fn fetch_org_users(api: &Api) -> Result<Vec<OrgUser>> {
+    let candidates: Vec<MentionCandidate> = from_value(api.mention_candidates()?)?;
+    Ok(candidates
+        .iter()
+        .filter(|c| c.candidate_type == "user")
+        .map(OrgUser::from_candidate)
+        .collect())
+}
+
+/// Users matching a spec: user id (exact), or handle name / display name
+/// (case-insensitive). Returns every match so the caller can report ambiguity
+/// instead of picking one arbitrarily.
+fn match_org_users<'a>(users: &'a [OrgUser], spec: &str) -> Vec<&'a OrgUser> {
+    let spec = spec.trim();
+    let needle = spec.to_lowercase();
+    users
+        .iter()
+        .filter(|u| {
+            u.id == spec
+                || u.display_name.to_lowercase() == needle
+                || u.handle_name
+                    .as_deref()
+                    .is_some_and(|h| h.to_lowercase() == needle)
+        })
+        .collect()
+}
+
+const USER_COLUMNS: [&str; 3] = ["ID", "HANDLE", "NAME"];
+
+fn user_row(user: &OrgUser) -> Vec<String> {
+    vec![
+        user.id.clone(),
+        user.handle_name.clone().unwrap_or_else(|| "-".to_string()),
+        user.display_name.clone(),
+    ]
+}
+
+pub fn users(api: &Api, json: bool) -> Result<()> {
+    let users = fetch_org_users(api)?;
+    if json {
+        return print_json(&serde_json::to_value(&users)?);
+    }
+    let rows: Vec<Vec<String>> = users.iter().map(user_row).collect();
+    print_table(&USER_COLUMNS, &rows);
+    Ok(())
+}
+
+pub fn user(api: &Api, spec: &str, json: bool) -> Result<()> {
+    // "me" cannot be matched against the list: bots have no handle name, and a
+    // display name is not necessarily unique. Resolve it to an id first.
+    // The trim keeps it consistent with match_org_users, which also trims.
+    let spec = if spec.trim() == "me" {
+        let me: Me = from_value(api.me()?)?;
+        me.id
+    } else {
+        spec.to_string()
+    };
+    let users = fetch_org_users(api)?;
+    let matches = match_org_users(&users, &spec);
+    let user = match matches.len() {
+        1 => matches[0],
+        0 => bail!("no user matched '{spec}' in this organization"),
+        _ => bail!(
+            "ambiguous user '{spec}': {}",
+            matches
+                .iter()
+                .map(|u| u.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    if json {
+        return print_json(&serde_json::to_value(user)?);
+    }
+    print_table(&USER_COLUMNS, &[user_row(user)]);
     Ok(())
 }
 
@@ -1083,6 +1164,80 @@ pub fn notifications_read(api: &Api, ids: &[String], all: bool, json: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SUZUKI_ID: &str = "019f31d1-0000-0000-0000-000000000001";
+    const BOT_ID: &str = "019f31d1-0000-0000-0000-000000000002";
+
+    fn mention_candidates() -> Vec<MentionCandidate> {
+        from_value(json!([
+            {
+                "type": "user",
+                "id": SUZUKI_ID,
+                "handle_name": "Suzuki",
+                "display_name": "Suzuki Taro",
+            },
+            // Bots have no email, so the server cannot derive a handle name.
+            {
+                "type": "user",
+                "id": BOT_ID,
+                "handle_name": "",
+                "display_name": "Amedeo",
+            },
+            {
+                "type": "group",
+                "id": "019f31d1-0000-0000-0000-000000000003",
+                "handle_name": "dev-team",
+                "display_name": "Dev team",
+            },
+        ]))
+        .unwrap()
+    }
+
+    fn org_users() -> Vec<OrgUser> {
+        mention_candidates()
+            .iter()
+            .filter(|c| c.candidate_type == "user")
+            .map(OrgUser::from_candidate)
+            .collect()
+    }
+
+    fn matched_ids(spec: &str) -> Vec<String> {
+        match_org_users(&org_users(), spec)
+            .iter()
+            .map(|u| u.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn matches_user_by_handle_display_name_and_id() {
+        for spec in ["suzuki", "SUZUKI", "Suzuki Taro", " suzuki "] {
+            assert_eq!(
+                matched_ids(spec),
+                vec![SUZUKI_ID.to_string()],
+                "spec {spec}"
+            );
+        }
+        assert_eq!(matched_ids(SUZUKI_ID), vec![SUZUKI_ID.to_string()]);
+    }
+
+    #[test]
+    fn matches_a_bot_without_a_handle_by_display_name() {
+        assert_eq!(matched_ids("amedeo"), vec![BOT_ID.to_string()]);
+    }
+
+    #[test]
+    fn an_empty_handle_name_matches_nothing() {
+        assert_eq!(
+            OrgUser::from_candidate(&mention_candidates()[1]).handle_name,
+            None
+        );
+        assert!(matched_ids("").is_empty());
+    }
+
+    #[test]
+    fn mention_groups_are_not_users() {
+        assert!(matched_ids("dev-team").is_empty());
+    }
 
     fn workflows(spec: &[(&str, &[(i64, &str)])]) -> Vec<Workflow> {
         let value = json!(spec

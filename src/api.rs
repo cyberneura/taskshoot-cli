@@ -262,6 +262,13 @@ impl Api {
         self.get(&self.project_path(project, "assignable-users/")?)
     }
 
+    /// Mention autocomplete candidates (organization members + mention groups).
+    /// The organization member list (`members/`) is admin-only, so this is the
+    /// user list every role can read.
+    pub fn mention_candidates(&self) -> Result<Value> {
+        self.get(&self.org_path("mention-candidates/")?)
+    }
+
     /// List notifications addressed to you (user-scoped, org-independent).
     pub fn notifications(&self, limit: u32, unread_only: bool) -> Result<Value> {
         let mut path = format!("/api/user/notifications?limit={limit}");

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Me {
@@ -174,6 +174,39 @@ pub struct AssignableUser {
     pub display_name: String,
     #[serde(default)]
     pub handle_name: Option<String>,
+}
+
+/// Entry of `/mention-candidates/` (organization members + mention groups).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MentionCandidate {
+    /// "user" or "group"
+    #[serde(rename = "type")]
+    pub candidate_type: String,
+    pub id: String,
+    /// Empty when the member has no handle name and none can be derived from
+    /// the email (bots, typically).
+    #[serde(default)]
+    pub handle_name: String,
+    pub display_name: String,
+}
+
+/// A user of the organization, as shown by `users` / `user`.
+#[derive(Debug, Clone, Serialize)]
+pub struct OrgUser {
+    pub id: String,
+    pub handle_name: Option<String>,
+    pub display_name: String,
+}
+
+impl OrgUser {
+    pub fn from_candidate(candidate: &MentionCandidate) -> Self {
+        let handle_name = candidate.handle_name.trim();
+        Self {
+            id: candidate.id.clone(),
+            handle_name: (!handle_name.is_empty()).then(|| handle_name.to_string()),
+            display_name: candidate.display_name.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

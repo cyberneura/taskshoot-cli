@@ -44,6 +44,10 @@ enum Cmd {
     Orgs,
     /// List projects in the organization
     Projects,
+    /// List users in the organization (id / handle name / display name)
+    Users,
+    /// Show one user: "me", a handle name, a display name, or a user id
+    User { user: String },
     /// List workflows and their stages for a project
     Workflows {
         #[arg(long)]
@@ -380,6 +384,8 @@ fn run() -> Result<()> {
         Cmd::Me => commands::me(&api, json),
         Cmd::Orgs => commands::orgs(&api, json),
         Cmd::Projects => commands::projects(&api, json),
+        Cmd::Users => commands::users(&api, json),
+        Cmd::User { user } => commands::user(&api, &user, json),
         Cmd::Workflows { project } => commands::workflows(&api, &project, json),
         Cmd::Categories { project } => commands::categories(&api, &project, json),
         Cmd::Category(cmd) => match cmd {

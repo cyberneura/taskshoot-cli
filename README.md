@@ -180,6 +180,9 @@ organization).
 taskshoot me                                   # who am I (verify auth)
 taskshoot orgs                                 # organizations you can access (works with no org set)
 taskshoot projects                             # list projects
+taskshoot users                                # organization users (id / handle / display name)
+taskshoot user ytyng                           # one user (handle name, display name or user id)
+taskshoot user me --json                       # your own user row (id for scripting)
 taskshoot workflows --project DEV              # progress flows and stages (value / label / terminal)
 taskshoot categories --project DEV             # task categories (id / name / color / ordering / state)
 
@@ -277,6 +280,16 @@ taskshoot notifications read --all             # mark all read
   detaches the category from the tasks already using it, so hide it with
   `category update <name> --active false` instead: it disappears from the task form while
   staying on those tasks.
+- `users` lists the organization's users, and `user <spec>` shows one of them. `spec` is
+  the literal `me`, a handle name, a display name (both case-insensitive) or a user id;
+  `user` errors when it matches no one, or more than one member. Use them to look up the
+  handle names and ids that `--assignee` / `--mentioned` take.
+- Both read the mention candidates (`/mention-candidates/`), so the handle names are
+  exactly the ones `@` mentions resolve, and members with no handle name of their own get
+  the default derived from their email. Bots have neither, so `HANDLE` prints `-` for them
+  and they can only be referenced by display name or id. Mention *groups* are not listed
+  (they are not users). The organization member list, which also carries email and role,
+  is admin-only and is intentionally not used here.
 - `me` / `orgs` / `notifications` work with no organization set
   (`TASKSHOOT_CLI_ORGANIZATION` unset); notifications are user-scoped and cross-org.
 - `search` searches across all projects in the organization (`/task-search/` API). The
