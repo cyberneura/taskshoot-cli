@@ -86,6 +86,9 @@ taskshoot orgs    # organizations you can access (works with no org set)
 
 ```bash
 taskshoot projects                              # list projects
+taskshoot users                                 # organization users (id / handle / display name)
+taskshoot user ytyng                            # one user: handle name, display name or user id
+taskshoot user me --json                        # your own row (handy to grab your user id)
 taskshoot workflows --project DEV               # progress flows and stages (value / label / terminal)
 taskshoot categories --project DEV              # task categories (id / name / color / ordering / state)
 
@@ -178,6 +181,13 @@ taskshoot notifications read --all
 - **`--mentioned <user>`** narrows to tasks whose description or a comment @-mentions that
   user. Give `me`, a handle name, a display name, or a user id. Mentions of groups the
   user belongs to are included.
+- **`users` / `user <spec>`** list the organization's users and show one of them; use them
+  to look up the handle names and ids that `--assignee` / `--mentioned` accept. `spec` is
+  the literal `me`, a handle name, a display name (both case-insensitive) or a user id,
+  and `user` errors when it matches no one or more than one member. Both read the mention
+  candidates, so the handle names are the ones `@` mentions resolve; bots have no handle
+  name (`HANDLE` is `-`) and must be referenced by display name or id. Mention groups are
+  not listed, and email / role are not available (that endpoint is admin-only).
 - **`task complete`** moves to the workflow's terminal stage. If the project has an
   acceptance flow, the task enters the acceptance phase instead of being completed (by
   design). `--comment` is posted to the thread after completion succeeds.
