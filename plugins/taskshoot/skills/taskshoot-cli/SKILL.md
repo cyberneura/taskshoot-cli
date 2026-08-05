@@ -93,6 +93,7 @@ taskshoot workflows --project DEV               # progress flows and stages (val
 taskshoot categories --project DEV              # task categories (id / name / color / ordering / state)
 
 taskshoot tasks --project DEV                   # list tasks
+taskshoot tasks --project DEV,SALES             # several projects merged into one list (OR)
 taskshoot tasks --project DEV --status draft --assignee me
 taskshoot tasks --project DEV --status draft,in-progress            # multiple values are OR'd
 taskshoot tasks --project DEV --exclude-status done                # exclude a status (exclusive with --status)
@@ -172,6 +173,17 @@ taskshoot notifications read --all
     Values may be a label or the english value (`done` / `invalid` / `rejected` /
     `cancelled` / `in_progress` / `acceptance` / `pre_approval`). The JSON `phase` field
     is returned as the english value.
+- **`tasks --project` accepts multiple projects** (comma-separated or by repeating the
+  flag) and merges them into one newest-first list, so a cross-project sweep no longer
+  needs a shell loop. One request is sent per project, which is why:
+  - `--limit` is **per project** (3 projects can return `3 x limit` tasks).
+  - `--status` / `--exclude-status` labels are resolved **per project** (they belong to
+    that project's workflows). A label that a listed project does not define is an error
+    naming it (`error: project TEST: unknown status ...`) — drop that project from the
+    list, or pass the numeric value.
+  - `--assignee` / `--mentioned` are resolved once (a user id is organization-wide).
+  - Any request failing fails the whole command, so a partial list is never mistaken for
+    a complete one. Loop per project instead when you want to tolerate that.
 - **`--status` / `--exclude-status` accept multiple values** (comma-separated or by
   repeating the flag) and are OR'd; the two flags are mutually exclusive. Both are
   server-side filters, so they apply *before* `--limit` truncation — more accurate than
