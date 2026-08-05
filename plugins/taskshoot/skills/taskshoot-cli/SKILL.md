@@ -184,6 +184,9 @@ taskshoot notifications read --all
   - `--assignee` / `--mentioned` are resolved once (a user id is organization-wide).
   - Any request failing fails the whole command, so a partial list is never mistaken for
     a complete one. Loop per project instead when you want to tolerate that.
+  - The table gains a **PROJECT** column in this mode (an untracked task's ref is a bare
+    UUID, and `task show <uuid>` needs `--project`). Single-project output is unchanged;
+    `--json` is unaffected either way (`project_key` is always in the payload).
 - **`--status` / `--exclude-status` accept multiple values** (comma-separated or by
   repeating the flag) and are OR'd; the two flags are mutually exclusive. Both are
   server-side filters, so they apply *before* `--limit` truncation — more accurate than

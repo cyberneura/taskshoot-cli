@@ -250,6 +250,9 @@ taskshoot notifications read --all             # mark all read
     member of every listed project still resolves.
   - Duplicate keys are folded, and any of the requests failing fails the command (a
     partial list is never printed as if it were complete).
+  - The table gains a **PROJECT** column when several projects are listed, since an
+    untracked task's ref is a bare UUID and `task show <uuid>` needs `--project`. Output
+    for a single project is unchanged.
 - `--status` accepts a label (e.g. `in-progress`) or a numeric value (e.g. `40`). For
   single-task operations (`task update`, …) it is resolved against that task's workflow.
   For `tasks --status` (the list filter) it is resolved against all of the project's

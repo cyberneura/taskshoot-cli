@@ -897,28 +897,44 @@ pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -
         .iter()
         .map(|item| {
             let task: Task = from_value(item.clone())?;
-            let updated = task
-                .latest_event_at
-                .as_deref()
-                .unwrap_or(&task.created_at)
-                .chars()
-                .take(10)
-                .collect::<String>();
-            Ok(vec![
-                task.display_ref(),
-                task.status_label.clone(),
-                format!("{}%", task.progress),
-                author_name(&task.assignee),
-                truncate_width(&task.title, 48),
-                updated,
-            ])
+            Ok(task_row(&task, multi))
         })
         .collect::<Result<_>>()?;
-    print_table(
-        &["REF", "STATUS", "PROG", "ASSIGNEE", "TITLE", "UPDATED"],
-        &rows,
-    );
+    let headers: &[&str] = if multi {
+        &[
+            "REF", "PROJECT", "STATUS", "PROG", "ASSIGNEE", "TITLE", "UPDATED",
+        ]
+    } else {
+        &["REF", "STATUS", "PROG", "ASSIGNEE", "TITLE", "UPDATED"]
+    };
+    print_table(headers, &rows);
     Ok(())
+}
+
+/// One table row for `tasks`. With several projects merged into one list, a
+/// PROJECT column is added: an untracked task has no number, so its ref is a
+/// bare UUID, and `task show <uuid>` needs the project key that the ref alone
+/// no longer implies.
+fn task_row(task: &Task, multi: bool) -> Vec<String> {
+    let updated = task
+        .latest_event_at
+        .as_deref()
+        .unwrap_or(&task.created_at)
+        .chars()
+        .take(10)
+        .collect::<String>();
+    let mut row = vec![task.display_ref()];
+    if multi {
+        row.push(task.project_key.clone());
+    }
+    row.extend([
+        task.status_label.clone(),
+        format!("{}%", task.progress),
+        author_name(&task.assignee),
+        truncate_width(&task.title, 48),
+        updated,
+    ]);
+    row
 }
 
 pub fn search(api: &Api, query: &str, limit: u32, json: bool) -> Result<()> {
@@ -1680,5 +1696,50 @@ mod tests {
         ] {
             assert_eq!(parse_timestamp(raw), None, "{raw} should not parse");
         }
+    }
+
+    fn row_task(number: Option<u64>) -> Task {
+        from_value(json!({
+            "id": "019f31d1-0000-0000-0000-0000000000ff",
+            "project_key": "SALES",
+            "number": number,
+            "title": "見積もりを送る",
+            "workflow": {"id": "019f31d1-0000-0000-0000-000000000010", "name": "デフォルト"},
+            "phase": "in_progress",
+            "status": 40,
+            "status_label": "対応中",
+            "progress": 30,
+            "assignee": null,
+            "owner": null,
+            "reporter": null,
+            "tracked": number.is_some(),
+            "latest_event_at": "2026-08-05T09:00:00Z",
+            "created_at": "2026-08-01T00:00:00Z",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_single_project_row_has_no_project_column() {
+        let row = task_row(&row_task(Some(12)), false);
+        assert_eq!(row[0], "SALES-12");
+        assert_eq!(row[1], "対応中");
+    }
+
+    #[test]
+    fn a_merged_row_names_its_project() {
+        let row = task_row(&row_task(Some(12)), true);
+        assert_eq!(row[0], "SALES-12");
+        assert_eq!(row[1], "SALES");
+        assert_eq!(row[2], "対応中");
+    }
+
+    #[test]
+    fn an_untracked_merged_row_names_the_project_its_uuid_needs() {
+        // an untracked task has no number, so its ref is a bare UUID and
+        // "task show <uuid>" cannot tell which --project to pass
+        let row = task_row(&row_task(None), true);
+        assert_eq!(row[0], "019f31d1-0000-0000-0000-0000000000ff");
+        assert_eq!(row[1], "SALES");
     }
 }
