@@ -42,12 +42,21 @@ fn resolve_target(task_arg: &str, project: Option<&str>) -> Result<(String, Stri
 /// Resolve an assignee/owner spec: "me" → yourself, UUID → as-is, otherwise
 /// match handle_name / display_name of assignable-users (case-insensitive).
 fn resolve_user_id(api: &Api, project: &str, spec: &str) -> Result<String> {
+    lookup_user_id(api, project, spec)?
+        .with_context(|| format!("no user matched '{spec}' in project {project}"))
+}
+
+/// The lookup behind `resolve_user_id`. A spec matching nobody in this project
+/// is `Ok(None)` rather than an error, so a multi-project listing can try the
+/// next project; an ambiguous spec is still an error (looking elsewhere cannot
+/// fix it).
+fn lookup_user_id(api: &Api, project: &str, spec: &str) -> Result<Option<String>> {
     if spec == "me" {
         let me: Me = from_value(api.me()?)?;
-        return Ok(me.id);
+        return Ok(Some(me.id));
     }
     if Uuid::parse_str(spec).is_ok() {
-        return Ok(spec.to_string());
+        return Ok(Some(spec.to_string()));
     }
     let users: Vec<AssignableUser> = from_value(api.assignable_users(project)?)?;
     let needle = spec.to_lowercase();
@@ -61,8 +70,8 @@ fn resolve_user_id(api: &Api, project: &str, spec: &str) -> Result<String> {
         })
         .collect();
     match matches.len() {
-        1 => Ok(matches[0].id.clone()),
-        0 => bail!("no user matched '{spec}' in project {project}"),
+        1 => Ok(Some(matches[0].id.clone())),
+        0 => Ok(None),
         _ => bail!(
             "ambiguous user '{spec}': {}",
             matches
@@ -599,33 +608,183 @@ fn resolve_list_statuses(api: &Api, project: &str, inputs: &[String]) -> Result<
     Ok(resolved)
 }
 
-pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Result<()> {
-    let tracked = if filter.untracked {
-        Some(false)
-    } else if filter.tracked {
-        Some(true)
-    } else {
-        None
+/// Normalize the `--project` values: trim, reject blanks, and fold duplicates
+/// while keeping the order given (the order decides which project resolves the
+/// user filter, and is the tiebreaker of the merged output).
+fn normalize_project_keys(projects: &[String]) -> Result<Vec<String>> {
+    let mut keys: Vec<String> = Vec::new();
+    for project in projects {
+        let key = project.trim();
+        if key.is_empty() {
+            bail!("empty project key (check for a stray comma)");
+        }
+        if !keys.iter().any(|k| k == key) {
+            keys.push(key.to_string());
+        }
+    }
+    if keys.is_empty() {
+        bail!("--project requires at least one project key");
+    }
+    Ok(keys)
+}
+
+/// Resolve a user spec once for a multi-project listing.
+///
+/// `assignable-users` is project-scoped while a user id is organization-wide, so
+/// "not a member of the first project" is no reason to fail when the same person
+/// is a member of another project being listed: try the projects in order and
+/// take the first hit.
+///
+/// Statuses are *not* resolved this way (see `project_tasks`): a status label
+/// belongs to the project's workflows, so it has to be resolved per project.
+fn resolve_user_id_for_projects(api: &Api, projects: &[String], spec: &str) -> Result<String> {
+    for project in projects {
+        if let Some(id) = lookup_user_id(api, project, spec)? {
+            return Ok(id);
+        }
+    }
+    match projects {
+        [project] => bail!("no user matched '{spec}' in project {project}"),
+        _ => bail!(
+            "no user matched '{spec}' in projects {}",
+            projects.join(", ")
+        ),
+    }
+}
+
+/// Days between 1970-01-01 and the given civil date (Howard Hinnant's
+/// `days_from_civil`), so that a timestamp can be reduced to an instant without
+/// pulling in a date/time crate.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400; // [0, 399]
+    let shifted_month = (month + 9) % 12; // March = 0
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1; // [0, 365]
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year; // [0, 146096]
+    era * 146097 + day_of_era - 719468
+}
+
+/// Split "12:34:56.789+09:00" into its time part and the offset in minutes.
+/// A missing offset is taken as UTC (the API always sends one).
+fn split_utc_offset(rest: &str) -> Option<(&str, i64)> {
+    if let Some(time) = rest.strip_suffix(['Z', 'z']) {
+        return Some((time, 0));
+    }
+    // The time itself holds no sign, so the last one starts the offset
+    let Some(sign_at) = rest.rfind(['+', '-']) else {
+        return Some((rest, 0));
     };
-    // Resolve status / assignee into server-side filters and pass them through
+    let (time, offset) = rest.split_at(sign_at);
+    let sign = if offset.starts_with('-') { -1 } else { 1 };
+    // "+09:00" / "+0900" / "+09"
+    let digits: Vec<u32> = offset[1..]
+        .chars()
+        .filter(|c| *c != ':')
+        .map(|c| c.to_digit(10))
+        .collect::<Option<_>>()?;
+    let number = |digits: &[u32]| digits.iter().fold(0i64, |n, d| n * 10 + i64::from(*d));
+    let (hours, minutes) = match digits.len() {
+        2 => (number(&digits), 0),
+        4 => (number(&digits[..2]), number(&digits[2..])),
+        _ => return None,
+    };
+    Some((time, sign * (hours * 60 + minutes)))
+}
+
+/// Parse an API timestamp into (seconds since the epoch, microseconds).
+///
+/// The values are ISO 8601 (`2026-08-05T09:47:08.921505+00:00`), but the exact
+/// text varies -- the offset may be written `Z`, and a whole second is sent
+/// without the `.000000` -- so comparing the strings would disagree with the
+/// chronological order. Parsing is done here rather than with a date crate
+/// because ordering a listing is the only thing the CLI needs it for.
+fn parse_timestamp(raw: &str) -> Option<(i64, u32)> {
+    let (date, rest) = raw.trim().split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    if date_parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let (time, offset_minutes) = split_utc_offset(rest)?;
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts.next()?.parse().ok()?;
+    let minute: i64 = time_parts.next()?.parse().ok()?;
+    let seconds_field = time_parts.next()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+    let (second, fraction) = seconds_field.split_once('.').unwrap_or((seconds_field, ""));
+    let second: i64 = second.parse().ok()?;
+    // ".9" is 900000 microseconds, so pad on the right (and drop nanoseconds)
+    let microseconds = fraction
+        .chars()
+        .map(|c| c.to_digit(10))
+        .chain(std::iter::repeat(Some(0)))
+        .take(6)
+        .try_fold(0u32, |n, digit| Some(n * 10 + digit?))?;
+    let seconds = days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second
+        - offset_minutes * 60;
+    Some((seconds, microseconds))
+}
+
+/// Sort key of a listed task: the server orders by `-latest_event_at,
+/// -created_at`, so merging several projects on the same key keeps each
+/// project's own order intact. A timestamp that cannot be parsed sorts last
+/// (there is no sensible instant to place it at).
+fn task_sort_key(task: &Value) -> ((i64, u32), (i64, u32)) {
+    const OLDEST: (i64, u32) = (i64::MIN, 0);
+    let timestamp = |field: &str| {
+        task[field]
+            .as_str()
+            .and_then(parse_timestamp)
+            .unwrap_or(OLDEST)
+    };
+    let created_at = timestamp("created_at");
+    let latest_event_at = match task["latest_event_at"].as_str().and_then(parse_timestamp) {
+        Some(latest_event_at) => latest_event_at,
+        None => created_at,
+    };
+    (latest_event_at, created_at)
+}
+
+/// Order a merged listing the way the server orders a single project's.
+fn sort_tasks_newest_first(tasks: &mut [Value]) {
+    tasks.sort_by_key(|task| std::cmp::Reverse(task_sort_key(task)));
+}
+
+/// The part of a task listing that is resolved once for every project.
+struct ProjectTasksQuery<'a> {
+    tracked: Option<bool>,
+    exclude_phase: &'a [String],
+    assignee_id: Option<&'a str>,
+    mentioned_user_id: Option<&'a str>,
+}
+
+/// List one project's tasks. `multi` only decides whether warnings name the
+/// project (they would be ambiguous otherwise).
+fn project_tasks(
+    api: &Api,
+    project: &str,
+    filter: &TasksFilter,
+    shared: &ProjectTasksQuery,
+    multi: bool,
+) -> Result<Vec<Value>> {
+    // A status label is defined by the project's workflows, so it is resolved
+    // per project -- the same label can have a different value elsewhere, and an
+    // unknown label is an error rather than a project that silently matches
+    // nothing.
     // (--status and --exclude-status are mutually exclusive in clap, so the
     //  workflow is fetched at most once)
     let status = resolve_list_statuses(api, project, &filter.status)?;
     let exclude_status = resolve_list_statuses(api, project, &filter.exclude_status)?;
-    let exclude_phase = resolve_phases(&filter.exclude_phase)?;
-    let assignee_id = match &filter.assignee {
-        Some(assignee) => Some(resolve_user_id(api, project, assignee)?),
-        None => None,
-    };
-    let mentioned_user_id = match &filter.mentioned {
-        Some(mentioned) => Some(resolve_user_id(api, project, mentioned)?),
-        None => None,
-    };
     let has_filter = !status.is_empty()
         || !exclude_status.is_empty()
-        || !exclude_phase.is_empty()
-        || assignee_id.is_some()
-        || mentioned_user_id.is_some()
+        || !shared.exclude_phase.is_empty()
+        || shared.assignee_id.is_some()
+        || shared.mentioned_user_id.is_some()
         || filter.bot_ready.is_some();
     // exclude drops by numeric value on the server, so tasks with a different
     // label sharing that value are swept in too. The client cannot restore them
@@ -637,6 +796,8 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
             exclude_status.collisions.join("; ")
         );
     }
+    // The limit is per project: the server applies it before returning, and
+    // trimming the merged list afterwards would drop tasks without saying so.
     let limit = filter
         .limit
         .unwrap_or(if has_filter { 500 } else { 200 })
@@ -644,13 +805,13 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
     let value = api.tasks(
         project,
         &TasksQuery {
-            tracked,
+            tracked: shared.tracked,
             limit,
             status: status.values.clone(),
             exclude_status: exclude_status.values,
-            exclude_phase,
-            assignee_id,
-            mentioned_user_id,
+            exclude_phase: shared.exclude_phase.to_vec(),
+            assignee_id: shared.assignee_id.map(str::to_string),
+            mentioned_user_id: shared.mentioned_user_id.map(str::to_string),
             bot_ready: filter.bot_ready,
         },
     )?;
@@ -658,8 +819,13 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
     let mut items: Vec<Value> = from_value(value)?;
     // If exactly `limit` items came back, older matching tasks may have been cut off
     if items.len() as u32 >= limit {
+        let scope = if multi {
+            format!(" of {project}")
+        } else {
+            String::new()
+        };
         eprintln!(
-            "warning: result may be truncated to the newest {limit} tasks; \
+            "warning: result may be truncated to the newest {limit} tasks{scope}; \
              raise --limit (max 500) if you need more"
         );
     }
@@ -677,6 +843,52 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
                     .is_some_and(|value| status.numeric_values.contains(&value))
         });
     }
+    Ok(items)
+}
+
+pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -> Result<()> {
+    let projects = normalize_project_keys(projects)?;
+    let tracked = if filter.untracked {
+        Some(false)
+    } else if filter.tracked {
+        Some(true)
+    } else {
+        None
+    };
+    let exclude_phase = resolve_phases(&filter.exclude_phase)?;
+    // A user id is organization-wide, so it is resolved once and reused for
+    // every project (a status label is not: see the per-project loop below)
+    let assignee_id = match &filter.assignee {
+        Some(assignee) => Some(resolve_user_id_for_projects(api, &projects, assignee)?),
+        None => None,
+    };
+    let mentioned_user_id = match &filter.mentioned {
+        Some(mentioned) => Some(resolve_user_id_for_projects(api, &projects, mentioned)?),
+        None => None,
+    };
+    let multi = projects.len() > 1;
+    let mut items: Vec<Value> = Vec::new();
+    for project in &projects {
+        let mut project_items = project_tasks(
+            api,
+            project,
+            filter,
+            &ProjectTasksQuery {
+                tracked,
+                exclude_phase: &exclude_phase,
+                assignee_id: assignee_id.as_deref(),
+                mentioned_user_id: mentioned_user_id.as_deref(),
+            },
+            multi,
+        )
+        .with_context(|| format!("project {project}"))?;
+        items.append(&mut project_items);
+    }
+    // Each project comes back sorted, so the merged list is re-sorted on the
+    // server's own key to read as one list (a single project keeps its order)
+    if multi {
+        sort_tasks_newest_first(&mut items);
+    }
 
     if json {
         return print_json(&Value::Array(items));
@@ -685,28 +897,44 @@ pub fn tasks(api: &Api, project: &str, filter: &TasksFilter, json: bool) -> Resu
         .iter()
         .map(|item| {
             let task: Task = from_value(item.clone())?;
-            let updated = task
-                .latest_event_at
-                .as_deref()
-                .unwrap_or(&task.created_at)
-                .chars()
-                .take(10)
-                .collect::<String>();
-            Ok(vec![
-                task.display_ref(),
-                task.status_label.clone(),
-                format!("{}%", task.progress),
-                author_name(&task.assignee),
-                truncate_width(&task.title, 48),
-                updated,
-            ])
+            Ok(task_row(&task, multi))
         })
         .collect::<Result<_>>()?;
-    print_table(
-        &["REF", "STATUS", "PROG", "ASSIGNEE", "TITLE", "UPDATED"],
-        &rows,
-    );
+    let headers: &[&str] = if multi {
+        &[
+            "REF", "PROJECT", "STATUS", "PROG", "ASSIGNEE", "TITLE", "UPDATED",
+        ]
+    } else {
+        &["REF", "STATUS", "PROG", "ASSIGNEE", "TITLE", "UPDATED"]
+    };
+    print_table(headers, &rows);
     Ok(())
+}
+
+/// One table row for `tasks`. With several projects merged into one list, a
+/// PROJECT column is added: an untracked task has no number, so its ref is a
+/// bare UUID, and `task show <uuid>` needs the project key that the ref alone
+/// no longer implies.
+fn task_row(task: &Task, multi: bool) -> Vec<String> {
+    let updated = task
+        .latest_event_at
+        .as_deref()
+        .unwrap_or(&task.created_at)
+        .chars()
+        .take(10)
+        .collect::<String>();
+    let mut row = vec![task.display_ref()];
+    if multi {
+        row.push(task.project_key.clone());
+    }
+    row.extend([
+        task.status_label.clone(),
+        format!("{}%", task.progress),
+        author_name(&task.assignee),
+        truncate_width(&task.title, 48),
+        updated,
+    ]);
+    row
 }
 
 pub fn search(api: &Api, query: &str, limit: u32, json: bool) -> Result<()> {
@@ -1336,5 +1564,182 @@ mod tests {
         // "無効" and "invalid" fold into the same value
         let out = resolve_phases(&["完了".into(), "無効".into(), "invalid".into()]).unwrap();
         assert_eq!(out, vec!["done".to_string(), "invalid".to_string()]);
+    }
+
+    fn project_keys(input: &[&str]) -> Result<Vec<String>> {
+        normalize_project_keys(&input.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn project_keys_are_trimmed_and_deduped_in_order() {
+        assert_eq!(
+            project_keys(&["DEV", " SALES ", "DEV"]).unwrap(),
+            ["DEV", "SALES"]
+        );
+    }
+
+    #[test]
+    fn a_blank_project_key_is_an_error() {
+        // "--project DEV,,SALES" splits into an empty key
+        assert!(project_keys(&["DEV", "", "SALES"]).is_err());
+        assert!(project_keys(&["  "]).is_err());
+        assert!(project_keys(&[]).is_err());
+    }
+
+    fn task_json(latest_event_at: Option<&str>, created_at: &str) -> Value {
+        json!({"latest_event_at": latest_event_at, "created_at": created_at})
+    }
+
+    #[test]
+    fn merged_tasks_sort_newest_first_across_projects() {
+        // as returned by two projects, each already newest-first
+        let mut items = [
+            task_json(
+                Some("2026-08-05T09:00:00+00:00"),
+                "2026-08-01T00:00:00+00:00",
+            ),
+            task_json(
+                Some("2026-08-03T09:00:00+00:00"),
+                "2026-07-01T00:00:00+00:00",
+            ),
+            task_json(
+                Some("2026-08-04T09:00:00+00:00"),
+                "2026-08-02T00:00:00+00:00",
+            ),
+        ];
+        sort_tasks_newest_first(&mut items);
+        let order: Vec<&str> = items
+            .iter()
+            .map(|t| t["latest_event_at"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "2026-08-05T09:00:00+00:00",
+                "2026-08-04T09:00:00+00:00",
+                "2026-08-03T09:00:00+00:00",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_task_without_events_sorts_by_its_creation_time() {
+        let no_events = task_json(None, "2026-08-04T00:00:00+00:00");
+        let older = task_json(
+            Some("2026-08-03T00:00:00+00:00"),
+            "2026-08-01T00:00:00+00:00",
+        );
+        assert!(task_sort_key(&no_events) > task_sort_key(&older));
+    }
+
+    #[test]
+    fn an_unparsable_timestamp_sorts_last() {
+        let broken = task_json(Some("not a timestamp"), "also not a timestamp");
+        let ancient = task_json(
+            Some("1970-01-01T00:00:00+00:00"),
+            "1970-01-01T00:00:00+00:00",
+        );
+        assert!(task_sort_key(&broken) < task_sort_key(&ancient));
+    }
+
+    #[test]
+    fn timestamps_parse_to_the_same_instant_in_every_written_form() {
+        let epoch = Some((0, 0));
+        assert_eq!(parse_timestamp("1970-01-01T00:00:00+00:00"), epoch);
+        assert_eq!(parse_timestamp("1970-01-01T00:00:00Z"), epoch);
+        assert_eq!(parse_timestamp("1970-01-01T00:00:00.000000Z"), epoch);
+        assert_eq!(parse_timestamp("1970-01-01T00:00:00"), epoch);
+        // the same instant written in three other zones
+        assert_eq!(parse_timestamp("1970-01-01T09:00:00+09:00"), epoch);
+        assert_eq!(parse_timestamp("1970-01-01T09:00:00+0900"), epoch);
+        assert_eq!(parse_timestamp("1969-12-31T19:00:00-05:00"), epoch);
+        // a leading zero of the fraction counts: ".05" is 50000 microseconds
+        assert_eq!(
+            parse_timestamp("1970-01-01T00:00:00.05Z"),
+            Some((0, 50_000))
+        );
+        // nanosecond precision is truncated, not misread
+        assert_eq!(
+            parse_timestamp("1970-01-01T00:00:00.123456789Z"),
+            Some((0, 123_456))
+        );
+        // a date the leap-year rules have to get right
+        assert_eq!(
+            parse_timestamp("2000-02-29T00:00:00Z"),
+            Some((951_782_400, 0))
+        );
+    }
+
+    #[test]
+    fn a_mixed_form_timestamp_still_sorts_chronologically() {
+        // "+00:00" > "Z" and "0" < "9" as text, so a text comparison would put
+        // these two backwards
+        let with_offset = task_json(
+            Some("2026-08-05T00:00:00.000001+00:00"),
+            "2026-08-01T00:00:00Z",
+        );
+        let with_z = task_json(Some("2026-08-05T00:00:00.9Z"), "2026-08-01T00:00:00Z");
+        assert!(task_sort_key(&with_z) > task_sort_key(&with_offset));
+    }
+
+    #[test]
+    fn a_malformed_timestamp_is_rejected_rather_than_guessed() {
+        for raw in [
+            "",
+            "2026-08-05",
+            "2026-08-05T09:00",
+            "2026-08-05T09:00:00:00Z",
+            "2026-13-05T09:00:00Z",
+            "2026-08-05T09:00:0a Z",
+            "2026-08-05T09:00:00+9",
+            "2026-08-05T09:00:00.１２Z",
+        ] {
+            assert_eq!(parse_timestamp(raw), None, "{raw} should not parse");
+        }
+    }
+
+    fn row_task(number: Option<u64>) -> Task {
+        from_value(json!({
+            "id": "019f31d1-0000-0000-0000-0000000000ff",
+            "project_key": "SALES",
+            "number": number,
+            "title": "見積もりを送る",
+            "workflow": {"id": "019f31d1-0000-0000-0000-000000000010", "name": "デフォルト"},
+            "phase": "in_progress",
+            "status": 40,
+            "status_label": "対応中",
+            "progress": 30,
+            "assignee": null,
+            "owner": null,
+            "reporter": null,
+            "tracked": number.is_some(),
+            "latest_event_at": "2026-08-05T09:00:00Z",
+            "created_at": "2026-08-01T00:00:00Z",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_single_project_row_has_no_project_column() {
+        let row = task_row(&row_task(Some(12)), false);
+        assert_eq!(row[0], "SALES-12");
+        assert_eq!(row[1], "対応中");
+    }
+
+    #[test]
+    fn a_merged_row_names_its_project() {
+        let row = task_row(&row_task(Some(12)), true);
+        assert_eq!(row[0], "SALES-12");
+        assert_eq!(row[1], "SALES");
+        assert_eq!(row[2], "対応中");
+    }
+
+    #[test]
+    fn an_untracked_merged_row_names_the_project_its_uuid_needs() {
+        // an untracked task has no number, so its ref is a bare UUID and
+        // "task show <uuid>" cannot tell which --project to pass
+        let row = task_row(&row_task(None), true);
+        assert_eq!(row[0], "019f31d1-0000-0000-0000-0000000000ff");
+        assert_eq!(row[1], "SALES");
     }
 }

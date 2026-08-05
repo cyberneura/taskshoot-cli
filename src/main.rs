@@ -61,10 +61,13 @@ enum Cmd {
     /// Create / update a task category (requires the manager role or higher)
     #[command(subcommand)]
     Category(CategoryCmd),
-    /// List tasks in a project
+    /// List tasks in a project (or in several, merged)
     Tasks {
-        #[arg(long)]
-        project: String,
+        /// Project key. Repeatable and comma-separated; multiple projects are
+        /// OR'd into one list (e.g. --project GENERAL,SALES). --limit then
+        /// applies per project
+        #[arg(long, value_delimiter = ',', required = true)]
+        project: Vec<String>,
         /// Filter by status label (e.g. 起案) or numeric value (server-side).
         /// Repeatable and comma-separated; multiple values are OR'd
         /// (e.g. --status 起案,対応中)
@@ -99,7 +102,7 @@ enum Cmd {
         /// Filter by Bot Ready flag (true/false); bot loops use --bot-ready true
         #[arg(long)]
         bot_ready: Option<bool>,
-        /// Max tasks returned (1-500; default 200, or 500 when a
+        /// Max tasks returned per project (1-500; default 200, or 500 when a
         /// status/phase/assignee/mentioned/bot-ready filter is used)
         #[arg(long)]
         limit: Option<u32>,
@@ -638,6 +641,41 @@ mod tests {
                 "--ordering={value} should be rejected"
             );
         }
+    }
+
+    fn tasks_projects_of(args: &[&str]) -> Vec<String> {
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Tasks { project, .. } => project,
+            _ => panic!("expected the tasks command"),
+        }
+    }
+
+    #[test]
+    fn tasks_project_accepts_comma_separated_and_repeated_keys() {
+        assert_eq!(
+            tasks_projects_of(&["taskshoot", "tasks", "--project", "DEV"]),
+            ["DEV"]
+        );
+        assert_eq!(
+            tasks_projects_of(&["taskshoot", "tasks", "--project", "DEV,SALES"]),
+            ["DEV", "SALES"]
+        );
+        assert_eq!(
+            tasks_projects_of(&[
+                "taskshoot",
+                "tasks",
+                "--project",
+                "DEV",
+                "--project",
+                "SALES,QA",
+            ]),
+            ["DEV", "SALES", "QA"]
+        );
+    }
+
+    #[test]
+    fn tasks_requires_a_project() {
+        assert!(Cli::try_parse_from(["taskshoot", "tasks"]).is_err());
     }
 
     #[test]

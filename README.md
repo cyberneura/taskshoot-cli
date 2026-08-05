@@ -191,6 +191,8 @@ taskshoot category update Bug --project DEV --name Defect       # rename (name o
 taskshoot category update Defect --project DEV --active false   # hide from the task form
 
 taskshoot tasks --project DEV                  # list tasks
+taskshoot tasks --project DEV,SALES            # several projects merged into one list (OR)
+taskshoot tasks --project DEV --project SALES  # repeating the flag also ORs
 taskshoot tasks --project DEV --status draft --assignee me
 taskshoot tasks --project DEV --status draft,in-progress    # multiple values are OR'd
 taskshoot tasks --project DEV --status draft --status 40    # repeating the flag also ORs
@@ -234,6 +236,23 @@ taskshoot notifications read --all             # mark all read
 
 - Task references are `KEY-number` (e.g. `DEV-12`). Untracked tasks have no number, so
   reference them by UUID + `--project`.
+- `tasks --project` **accepts multiple projects** (comma-separated or by repeating the
+  flag), and merges them into one list ordered newest-first, exactly as a single project
+  is ordered. There is no cross-project API, so one request is sent per project:
+  - `--limit` is **per project** (a merged list of 3 projects can hold `3 x limit` tasks).
+    Trimming the merged list afterwards would silently drop tasks, so it is not done.
+  - `--status` / `--exclude-status` labels are resolved **per project**, because a status
+    label belongs to that project's workflows. A label none of a project's workflows
+    define is an error naming the project (`error: project TEST: unknown status ...`),
+    not a project that silently matches nothing.
+  - `--assignee` / `--mentioned` are resolved **once**: a user id is organization-wide.
+    The projects are tried in order and the first match wins, so a person who is not a
+    member of every listed project still resolves.
+  - Duplicate keys are folded, and any of the requests failing fails the command (a
+    partial list is never printed as if it were complete).
+  - The table gains a **PROJECT** column when several projects are listed, since an
+    untracked task's ref is a bare UUID and `task show <uuid>` needs `--project`. Output
+    for a single project is unchanged.
 - `--status` accepts a label (e.g. `in-progress`) or a numeric value (e.g. `40`). For
   single-task operations (`task update`, …) it is resolved against that task's workflow.
   For `tasks --status` (the list filter) it is resolved against all of the project's
