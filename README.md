@@ -200,6 +200,7 @@ taskshoot tasks --project DEV --exclude-status done         # exclude a status (
 taskshoot tasks --project DEV --exclude-phase done,invalid,rejected,cancelled  # exclude terminal tasks by phase
 taskshoot tasks --project DEV --mentioned me   # tasks that @-mention you
 taskshoot tasks --project DEV --mentioned suzuki   # a specific person (handle / display name / id)
+taskshoot tasks --project DEV --mentioned-or-assignee me   # assigned to you OR @-mentioning you
 taskshoot tasks --project DEV --untracked      # casual tasks only
 taskshoot tasks --project DEV --bot-ready true # only tasks a bot may pick up
 
@@ -287,6 +288,17 @@ taskshoot notifications read --all             # mark all read
   name / display name / user id, same as `--assignee`. Matching follows the same rules as
   the web UI's mention rendering (handle_name, or a default handle derived from the email
   local part), and includes mentions of MentionGroups the user belongs to (`@dev-team`, …).
+- `tasks --mentioned-or-assignee <user>` is the **union** of `--assignee` and `--mentioned`:
+  "assigned to that user **or** @-mentioning them". It is what a bot loop wants (`--bot-ready
+  true --mentioned-or-assignee me`), because a task meant for a bot is sometimes handed over
+  by assigning it and sometimes by mentioning it. The API filters with AND only, so the
+  union is done client-side:
+  - Two requests are sent **per project** (one filtered by assignee, one by mention) and
+    merged, so `--limit` applies to each half; a project can return up to `2 x limit` tasks.
+    A task matching both halves is returned once (folded by task id).
+  - The merged list is re-ordered newest-first on the server's own key, so it reads exactly
+    like a single-filter listing.
+  - It cannot be combined with `--assignee` or `--mentioned` (it already is both).
 - `--category` (task create / update) takes a category name (case-insensitive) or id. List
   them with `taskshoot categories --project <KEY>`. `task update --category ""` clears it.
 - `category create` / `category update` manage the categories themselves and **require the
@@ -318,7 +330,9 @@ taskshoot notifications read --all             # mark all read
 ### Example AI-agent flow
 
 ```bash
-taskshoot tasks --project DEV --bot-ready true --status draft --json  # find pickable, unstarted tasks
+# find pickable, unstarted tasks that are meant for this bot (assigned to it or mentioning it)
+taskshoot tasks --project DEV --bot-ready true --status draft \
+  --exclude-phase done,invalid,rejected,cancelled --mentioned-or-assignee me --json
 taskshoot task claim DEV-12 --if-unassigned --json     # claim it (avoids double-processing: 409 if taken)
 taskshoot task comment DEV-12 "Starting now" --json
 # ... development ...

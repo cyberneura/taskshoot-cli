@@ -93,6 +93,12 @@ enum Cmd {
         /// mention groups the user belongs to (server-side)
         #[arg(long)]
         mentioned: Option<String>,
+        /// Filter to tasks assigned to the user OR mentioning them (the union
+        /// of --assignee and --mentioned; bot loops use
+        /// --mentioned-or-assignee me). Sent as two requests per project and
+        /// merged, so --limit applies to each half
+        #[arg(long, conflicts_with_all = ["assignee", "mentioned"])]
+        mentioned_or_assignee: Option<String>,
         /// Only untracked (casual) tasks
         #[arg(long)]
         untracked: bool,
@@ -102,8 +108,9 @@ enum Cmd {
         /// Filter by Bot Ready flag (true/false); bot loops use --bot-ready true
         #[arg(long)]
         bot_ready: Option<bool>,
-        /// Max tasks returned per project (1-500; default 200, or 500 when a
-        /// status/phase/assignee/mentioned/bot-ready filter is used)
+        /// Max tasks returned per project and per request (1-500; default 200,
+        /// or 500 when a status, phase, assignee, mentioned,
+        /// mentioned-or-assignee or bot-ready filter is used)
         #[arg(long)]
         limit: Option<u32>,
     },
@@ -436,6 +443,7 @@ fn run() -> Result<()> {
             exclude_phase,
             assignee,
             mentioned,
+            mentioned_or_assignee,
             untracked,
             tracked,
             bot_ready,
@@ -449,6 +457,7 @@ fn run() -> Result<()> {
                 exclude_phase,
                 assignee,
                 mentioned,
+                mentioned_or_assignee,
                 untracked,
                 tracked,
                 bot_ready,
@@ -676,6 +685,37 @@ mod tests {
     #[test]
     fn tasks_requires_a_project() {
         assert!(Cli::try_parse_from(["taskshoot", "tasks"]).is_err());
+    }
+
+    #[test]
+    fn tasks_mentioned_or_assignee_replaces_the_two_filters_it_unions() {
+        // it means "--assignee OR --mentioned", so combining it with either of
+        // them would be an AND of a filter with its own union
+        for other in ["--assignee", "--mentioned"] {
+            assert!(
+                Cli::try_parse_from([
+                    "taskshoot",
+                    "tasks",
+                    "--project",
+                    "DEV",
+                    "--mentioned-or-assignee",
+                    "me",
+                    other,
+                    "me",
+                ])
+                .is_err(),
+                "{other} should conflict with --mentioned-or-assignee"
+            );
+        }
+        assert!(Cli::try_parse_from([
+            "taskshoot",
+            "tasks",
+            "--project",
+            "DEV",
+            "--mentioned-or-assignee",
+            "me",
+        ])
+        .is_ok());
     }
 
     #[test]
