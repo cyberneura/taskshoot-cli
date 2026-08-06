@@ -75,6 +75,11 @@ taskshoot tasks --project DEV \
   --json | jq --arg me "$ME" '[.[] | select(.assignee == null or .assignee.id == $me)]'
 ```
 
+- An agent that works across projects can **drop `--project` entirely** to sweep every
+  project of the organization in one command. A project whose workflows do not define the
+  status label is then skipped with a warning rather than failing the sweep — but if
+  *every* project is skipped the command exits `1`, so keep treating a non-zero exit as
+  "the search broke", not "no candidates".
 - Use `--status <initial-stage>` for the project's not-yet-started stage(s); pass several
   OR'd values (comma-separated) if there is more than one.
 - **Always pass `--exclude-phase done,invalid,rejected,cancelled`.** These are *phases*,

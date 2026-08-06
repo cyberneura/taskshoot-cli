@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context, Error, Result};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -501,9 +501,32 @@ fn resolve_phases(inputs: &[String]) -> Result<Vec<String>> {
     Ok(values)
 }
 
+/// "This project cannot answer this query": the filter names a status its
+/// workflows do not define, or define ambiguously. It is a property of the
+/// project, so retrying or waiting cannot change it.
+///
+/// It is a distinct error type only so that a sweep over every project
+/// (`--project` omitted) can recognize it by `downcast_ref` and leave that
+/// project out, while an outage or a broken response still fails the command
+/// rather than being downgraded to a short list that looks complete. It carries
+/// its own message so the printed error reads exactly as it did before.
+#[derive(Debug)]
+struct UnanswerableProject(String);
+
+impl std::fmt::Display for UnanswerableProject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UnanswerableProject {}
+
 /// Resolve a status label for list filtering. Looks across all of the project's
 /// workflows, and errors if the same label maps to different values across flows
 /// (prompting a numeric value instead).
+///
+/// Both failures are `UnanswerableProject`: the label belongs to the project's
+/// workflows, so another project may well resolve it.
 fn resolve_list_status_label(workflows: &[Workflow], input: &str) -> Result<i64> {
     let mut matches: Vec<(i64, String)> = Vec::new();
     for flow in workflows {
@@ -515,8 +538,10 @@ fn resolve_list_status_label(workflows: &[Workflow], input: &str) -> Result<i64>
     }
     match matches.len() {
         1 => Ok(matches[0].0),
-        0 => bail!("unknown status '{input}' in this project's workflows"),
-        _ => bail!(
+        0 => Err(Error::new(UnanswerableProject(format!(
+            "unknown status '{input}' in this project's workflows"
+        )))),
+        _ => Err(Error::new(UnanswerableProject(format!(
             "status label '{input}' maps to different values across workflows ({}); \
              specify a numeric value",
             matches
@@ -524,7 +549,7 @@ fn resolve_list_status_label(workflows: &[Workflow], input: &str) -> Result<i64>
                 .map(|(value, flow)| format!("{value} in {flow}"))
                 .collect::<Vec<_>>()
                 .join(", ")
-        ),
+        )))),
     }
 }
 
@@ -610,9 +635,61 @@ fn resolve_list_statuses(api: &Api, project: &str, inputs: &[String]) -> Result<
     Ok(resolved)
 }
 
+/// The projects one listing covers, and how they were chosen.
+struct ProjectSelection {
+    keys: Vec<String>,
+    /// True when `--project` was omitted and the whole organization was swept.
+    /// A project nobody named is dropped from the sweep when it cannot answer the
+    /// query (see `UnanswerableProject`); with an explicit `--project` the same
+    /// failure is an error, because a project the user asked about must not
+    /// silently match nothing.
+    implicit: bool,
+}
+
+/// Decide which projects to list: the ones given, or the whole organization when
+/// `--project` is omitted.
+fn resolve_project_keys(api: &Api, projects: &[String]) -> Result<ProjectSelection> {
+    if !projects.is_empty() {
+        return Ok(ProjectSelection {
+            keys: normalize_project_keys(projects)?,
+            implicit: false,
+        });
+    }
+    let keys = all_project_keys(from_value(api.projects()?)?);
+    if keys.is_empty() {
+        bail!("the organization has no project");
+    }
+    Ok(ProjectSelection {
+        keys,
+        implicit: true,
+    })
+}
+
+/// Every project of the organization, in the order the API returned them (which
+/// is the tiebreaker of the merged listing).
+///
+/// Inactive (archived) projects are kept: leaving them out would hide their tasks
+/// from a sweep that says it covers everything, and an archived project simply
+/// returns few or no tasks.
+fn all_project_keys(projects: Vec<Project>) -> Vec<String> {
+    projects.into_iter().map(|p| p.key).collect()
+}
+
+/// Whether a project's failure should drop it from the listing instead of failing
+/// the command: only for a project the user did not name, and only when the
+/// project itself cannot answer the query. A transport error, a server error or an
+/// unexpected response shape is never skipped -- turning an outage into a short
+/// list that exits 0 would misreport it as an answer.
+fn is_skippable_project_error(error: &Error, implicit: bool) -> bool {
+    implicit && error.downcast_ref::<UnanswerableProject>().is_some()
+}
+
 /// Normalize the `--project` values: trim, reject blanks, and fold duplicates
 /// while keeping the order given (the order decides which project resolves the
 /// user filter, and is the tiebreaker of the merged output).
+///
+/// Only called with at least one value: an omitted `--project` means "every
+/// project" and is handled by `resolve_project_keys` before this point.
 fn normalize_project_keys(projects: &[String]) -> Result<Vec<String>> {
     let mut keys: Vec<String> = Vec::new();
     for project in projects {
@@ -625,7 +702,7 @@ fn normalize_project_keys(projects: &[String]) -> Result<Vec<String>> {
         }
     }
     if keys.is_empty() {
-        bail!("--project requires at least one project key");
+        bail!("no project key given");
     }
     Ok(keys)
 }
@@ -887,7 +964,8 @@ fn project_tasks(
 }
 
 pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -> Result<()> {
-    let projects = normalize_project_keys(projects)?;
+    let selection = resolve_project_keys(api, projects)?;
+    let projects = selection.keys;
     let tracked = if filter.untracked {
         Some(false)
     } else if filter.tracked {
@@ -931,8 +1009,9 @@ pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -
     };
     let multi = projects.len() > 1;
     let mut items: Vec<Value> = Vec::new();
+    let mut skipped = 0usize;
     for project in &projects {
-        let mut project_items = project_tasks(
+        let listed = project_tasks(
             api,
             project,
             filter,
@@ -943,8 +1022,23 @@ pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -
             },
             multi,
         )
-        .with_context(|| format!("project {project}"))?;
-        items.append(&mut project_items);
+        .with_context(|| format!("project {project}"));
+        match listed {
+            Ok(mut project_items) => items.append(&mut project_items),
+            Err(error) if is_skippable_project_error(&error, selection.implicit) => {
+                skipped += 1;
+                // {:#} to include the context chain, so the warning names the
+                // project it dropped: "project X: unknown status ..."
+                eprintln!("warning: skipped {error:#}");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // Every project failing is not "no tasks matched" -- it is a filter no
+    // project can answer. Printing an empty list would read as an answer, so fail
+    // instead: the warnings above carry the reasons.
+    if skipped > 0 && skipped == projects.len() {
+        bail!("none of the {skipped} projects could be listed (see the warnings above)");
     }
     // Each project comes back sorted, so the merged list is re-sorted on the
     // server's own key to read as one list (a single project keeps its order)
@@ -1637,6 +1731,44 @@ mod tests {
         assert_eq!(
             project_keys(&["DEV", " SALES ", "DEV"]).unwrap(),
             ["DEV", "SALES"]
+        );
+    }
+
+    #[test]
+    fn an_omitted_project_covers_every_project_including_archived_ones() {
+        let projects: Vec<Project> = from_value(json!([
+            {"key": "GENERAL", "name": "general", "is_default": true},
+            {"key": "OLD", "name": "archived", "active": false},
+            {"key": "DEV", "name": "dev"},
+        ]))
+        .unwrap();
+        // the API order is kept: it is the tiebreaker of the merged listing
+        assert_eq!(all_project_keys(projects), ["GENERAL", "OLD", "DEV"]);
+        assert!(all_project_keys(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn only_an_unanswerable_project_is_skipped_and_only_when_implicit() {
+        let unanswerable = || {
+            resolve_list_status_label(&workflows(&[("default", &[(10, "起案")])]), "nope")
+                .unwrap_err()
+                .context("project TEST")
+        };
+        assert!(is_skippable_project_error(&unanswerable(), true));
+        // a project the user named must fail loudly instead
+        assert!(!is_skippable_project_error(&unanswerable(), false));
+        // an outage must never be downgraded to "this project has no tasks"
+        let outage = anyhow::anyhow!("API error 503: upstream down").context("project TEST");
+        assert!(!is_skippable_project_error(&outage, true));
+    }
+
+    #[test]
+    fn an_unanswerable_project_keeps_its_original_message() {
+        let error = resolve_list_status_label(&workflows(&[("default", &[(10, "起案")])]), "nope")
+            .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "unknown status 'nope' in this project's workflows"
         );
     }
 

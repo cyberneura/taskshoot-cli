@@ -193,6 +193,7 @@ taskshoot category update Defect --project DEV --active false   # hide from the 
 taskshoot tasks --project DEV                  # list tasks
 taskshoot tasks --project DEV,SALES            # several projects merged into one list (OR)
 taskshoot tasks --project DEV --project SALES  # repeating the flag also ORs
+taskshoot tasks                                # no --project: every project in the org
 taskshoot tasks --project DEV --status draft --assignee me
 taskshoot tasks --project DEV --status draft,in-progress    # multiple values are OR'd
 taskshoot tasks --project DEV --status draft --status 40    # repeating the flag also ORs
@@ -254,6 +255,21 @@ taskshoot notifications read --all             # mark all read
   - The table gains a **PROJECT** column when several projects are listed, since an
     untracked task's ref is a bare UUID and `task show <uuid>` needs `--project`. Output
     for a single project is unchanged.
+- `tasks` **without `--project` covers every project** of the organization, in the order
+  `taskshoot projects` returns them (archived projects included — leaving them out would
+  hide their tasks from a listing that claims to cover everything). It behaves like
+  listing those keys explicitly, with one deliberate difference:
+  - A project whose **workflows do not define a status label** used by `--status` /
+    `--exclude-status` (or define it ambiguously) is **skipped with a warning on stderr**
+    (`warning: skipped project TEST: unknown status ...`) instead of failing the command.
+    Nobody asked about that project by name, and a label most projects define should stay
+    usable org-wide. With an explicit `--project` the same failure is still an error.
+  - **Only that failure is skipped.** A transport error, an API error or an unexpected
+    response shape still fails the command, so an outage can never be downgraded to a
+    short list that exits `0`.
+  - If **every** project is skipped the command exits `1`
+    (`error: none of the 6 projects could be listed`) rather than printing an empty list:
+    a filter no project can answer and "no tasks matched" must not look alike to a script.
 - `--status` accepts a label (e.g. `in-progress`) or a numeric value (e.g. `40`). For
   single-task operations (`task update`, …) it is resolved against that task's workflow.
   For `tasks --status` (the list filter) it is resolved against all of the project's
