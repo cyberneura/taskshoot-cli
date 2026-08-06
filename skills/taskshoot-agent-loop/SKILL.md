@@ -27,9 +27,10 @@ that stops multiple agents from double-processing a task.
 - **`bot_ready`** — the human permission gate. A person sets `bot_ready=true` to say "a
   bot may pick this up". **Never touch a task with `bot_ready=false`.** Changes to the
   flag are recorded in the task's history.
-- **`--mentioned me`** — scopes the loop to work actually addressed to this agent. Filter
-  candidates to tasks that @-mention the bot user (including groups it belongs to), so
-  each agent only picks up what was directed at it.
+- **`--mentioned-or-assignee me`** — scopes the loop to work actually addressed to this
+  agent. Work is handed to a bot in two ways: by @-mentioning it (including groups it
+  belongs to) or by putting it in the assignee field. This flag is the union of the two,
+  so each agent picks up everything directed at it and nothing directed at another.
 
 ## How double-processing is prevented (atomic claim)
 
@@ -68,10 +69,10 @@ the page the API already returned, so it silently drops older matches.
 ```bash
 taskshoot tasks --project DEV \
   --bot-ready true \
-  --mentioned me \
+  --mentioned-or-assignee me \
   --status draft \
   --exclude-phase done,invalid,rejected,cancelled \
-  --json | jq '[.[] | select(.assignee == null)]'
+  --json | jq --arg me "$ME" '[.[] | select(.assignee == null or .assignee.id == $me)]'
 ```
 
 - Use `--status <initial-stage>` for the project's not-yet-started stage(s); pass several
@@ -80,8 +81,12 @@ taskshoot tasks --project DEV \
   not statuses. In particular an "invalid" task keeps its original stage (e.g. "draft"),
   so it would otherwise slip into a `--status draft` candidate list and `--exclude-status`
   could not remove it.
-- Filtering `assignee == null` locally just trims obviously-taken tasks to reduce wasted
-  409s; the real exclusion is the atomic claim in step 3.
+- Filtering to `assignee == null or assignee.id == $ME` locally just trims obviously-taken
+  tasks to reduce wasted 409s; the real exclusion is the atomic claim in step 3. Keeping
+  your own id matters with `--mentioned-or-assignee`: the assignee half returns tasks
+  already assigned to you, and `claim --if-unassigned` accepts those. Dropping tasks
+  assigned to *someone else* is the point — a mention does not override the fact that
+  another person or bot is already on it (`$ME` is the id resolved in step 0).
 
 If no candidates remain, stop (see "Termination").
 

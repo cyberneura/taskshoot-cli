@@ -339,6 +339,46 @@ taskshoot task comment DEV-12 "Starting now" --json
 taskshoot task complete DEV-12 --comment "Done. PR: <URL>" --json
 ```
 
+## Agent skills
+
+The repository ships the agent-facing documentation as **skills** in [`skills/`](skills):
+
+| Skill | What it covers |
+| :--- | :--- |
+| [`taskshoot-cli`](skills/taskshoot-cli/SKILL.md) | Driving the CLI: auth, listing, claiming, commenting, completing |
+| [`taskshoot-agent-loop`](skills/taskshoot-agent-loop/SKILL.md) | An unattended pick-up loop, including the atomic claim that stops two agents from processing one task |
+
+They are plain `skills/<name>/SKILL.md` directories, so any tool that reads that layout
+can install them.
+
+### With `npx skills` (Claude Code, Codex, Cursor, OpenCode, …)
+
+```bash
+npx skills add cyberneura/taskshoot-cli --list        # see what the repo offers
+npx skills add cyberneura/taskshoot-cli               # pick interactively
+npx skills add cyberneura/taskshoot-cli --skill taskshoot-cli   # just one
+npx skills add cyberneura/taskshoot-cli --all         # both, no prompts
+```
+
+### As a Claude Code plugin
+
+The repository is also a [plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces),
+which additionally lets `/plugin` manage updates:
+
+```bash
+/plugin marketplace add cyberneura/taskshoot-cli
+/plugin install taskshoot@taskshoot-tools
+```
+
+Both routes install the same files — pick whichever your agent supports. Neither
+installs the `taskshoot` binary itself; see [Installation](#installation) for that.
+
+> **Moved after 0.3.0**: the skills used to live in `plugins/taskshoot/skills/`, which is not
+> a path `npx skills` looks in. They are now at `skills/` in the repository root, and the
+> plugin manifest moved with them to `.claude-plugin/plugin.json` (the marketplace entry's
+> `source` is `"./"`). Plugin users get the new layout on the next release; anyone who
+> copied the old paths directly should re-point them at `skills/<name>/SKILL.md`.
+
 ## Development
 
 ```bash

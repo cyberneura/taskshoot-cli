@@ -99,6 +99,7 @@ taskshoot tasks --project DEV --status draft,in-progress            # multiple v
 taskshoot tasks --project DEV --exclude-status done                # exclude a status (exclusive with --status)
 taskshoot tasks --project DEV --exclude-phase done,invalid,rejected,cancelled  # drop terminal tasks
 taskshoot tasks --project DEV --mentioned me    # tasks that @-mention you
+taskshoot tasks --project DEV --mentioned-or-assignee me   # assigned to you OR @-mentioning you
 taskshoot tasks --project DEV --bot-ready true  # only tasks a bot may pick up
 taskshoot tasks --project DEV --untracked       # casual (numberless) tasks only
 
@@ -196,6 +197,12 @@ taskshoot notifications read --all
 - **`--mentioned <user>`** narrows to tasks whose description or a comment @-mentions that
   user. Give `me`, a handle name, a display name, or a user id. Mentions of groups the
   user belongs to are included.
+- **`--mentioned-or-assignee <user>`** is the union of `--assignee` and `--mentioned`
+  ("assigned to them **or** @-mentioning them"). Use it for "tasks meant for me" — work is
+  handed to an agent either by assigning it or by mentioning it, and each flag alone misses
+  half of it. The API filters with AND only, so the CLI sends two requests per project and
+  merges them (duplicates folded by task id, re-sorted newest-first), which means `--limit`
+  applies to each half. It cannot be combined with `--assignee` or `--mentioned`.
 - **`users` / `user <spec>`** list the organization's users and show one of them; use them
   to look up the handle names and ids that `--assignee` / `--mentioned` accept. `spec` is
   the literal `me`, a handle name, a display name (both case-insensitive) or a user id,

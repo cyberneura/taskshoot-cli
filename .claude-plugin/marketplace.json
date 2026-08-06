@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "taskshoot",
-      "source": "./plugins/taskshoot",
+      "source": "./",
       "description": "Taskshoot CLI usage and an autonomous agent-loop skill for AI coding agents",
       "version": "0.3.0",
       "author": {

@@ -1,0 +1,13 @@
+{
+  "name": "taskshoot",
+  "description": "Taskshoot CLI usage and an autonomous agent-loop skill",
+  "version": "0.3.0",
+  "author": {
+    "name": "Cyberneura"
+  },
+  "homepage": "https://github.com/cyberneura/taskshoot-cli",
+  "repository": "https://github.com/cyberneura/taskshoot-cli",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["taskshoot", "task", "cli", "agent"],
+  "skills": ["./skills/"]
+}
