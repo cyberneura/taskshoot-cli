@@ -505,17 +505,34 @@ fn resolve_phases(inputs: &[String]) -> Result<Vec<String>> {
 /// workflows do not define, or define ambiguously. It is a property of the
 /// project, so retrying or waiting cannot change it.
 ///
-/// It is a distinct error type only so that a sweep over every project
-/// (`--project` omitted) can recognize it by `downcast_ref` and leave that
-/// project out, while an outage or a broken response still fails the command
-/// rather than being downgraded to a short list that looks complete. It carries
-/// its own message so the printed error reads exactly as it did before.
+/// It is a distinct error type so that a sweep over every project (`--project`
+/// omitted) can recognize it by `downcast_ref` and leave that project out, while
+/// an outage or a broken response still fails the command rather than being
+/// downgraded to a short list that looks complete. Each variant carries its own
+/// message so the printed error reads exactly as it did before.
 #[derive(Debug)]
-struct UnanswerableProject(String);
+enum UnanswerableProject {
+    /// None of the project's workflows define this status label. In a sweep it
+    /// is per-label rather than fatal: `--status` values are OR'd, so a label
+    /// this project does not define simply matches nothing here.
+    UnknownStatus(String),
+    /// The label maps to different values in different workflows of the project,
+    /// so it cannot be turned into one server-side filter. Unlike an unknown
+    /// label this is never treated as "matches nothing" -- the request is
+    /// genuinely undecidable here.
+    AmbiguousStatus(String),
+    /// A `--status` filter was given but not one of its labels exists in this
+    /// project, so the filter selects nothing at all here.
+    NoStatusResolved(String),
+}
 
 impl std::fmt::Display for UnanswerableProject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::UnknownStatus(message)
+            | Self::AmbiguousStatus(message)
+            | Self::NoStatusResolved(message) => f.write_str(message),
+        }
     }
 }
 
@@ -538,10 +555,10 @@ fn resolve_list_status_label(workflows: &[Workflow], input: &str) -> Result<i64>
     }
     match matches.len() {
         1 => Ok(matches[0].0),
-        0 => Err(Error::new(UnanswerableProject(format!(
+        0 => Err(Error::new(UnanswerableProject::UnknownStatus(format!(
             "unknown status '{input}' in this project's workflows"
         )))),
-        _ => Err(Error::new(UnanswerableProject(format!(
+        _ => Err(Error::new(UnanswerableProject::AmbiguousStatus(format!(
             "status label '{input}' maps to different values across workflows ({}); \
              specify a numeric value",
             matches
@@ -595,10 +612,31 @@ fn status_value_collisions(workflows: &[Workflow], label: &str, value: i64) -> V
     out
 }
 
+/// What an unresolvable status label means for the project being listed.
+#[derive(Clone, Copy, PartialEq)]
+enum LabelStrictness {
+    /// The user named this project with `--project`, so a label its workflows do
+    /// not define is an error: a project asked about by name must not silently
+    /// match nothing.
+    Strict,
+    /// The project came from a `--project`-less sweep. `--status` values are
+    /// OR'd, and workflows differ across an organization, so a label this project
+    /// does not define contributes no matches *here* while the other labels still
+    /// apply -- `--status draft,起案` must not cost a project all of its `draft`
+    /// tasks. The project is only dropped when nothing at all resolves (see
+    /// `NoStatusResolved`). An *ambiguous* label is still an error either way.
+    Lenient,
+}
+
 /// Resolve statuses for list filtering (supports multiple values). Only when at
 /// least one label is present is the workflow fetched once, and all labels are
 /// resolved with it (does not hit the API once per value). Duplicates are folded.
-fn resolve_list_statuses(api: &Api, project: &str, inputs: &[String]) -> Result<ResolvedStatuses> {
+fn resolve_list_statuses(
+    api: &Api,
+    project: &str,
+    inputs: &[String],
+    strictness: LabelStrictness,
+) -> Result<ResolvedStatuses> {
     if inputs.is_empty() {
         return Ok(ResolvedStatuses::default());
     }
@@ -612,6 +650,18 @@ fn resolve_list_statuses(api: &Api, project: &str, inputs: &[String]) -> Result<
     } else {
         Vec::new()
     };
+    resolve_status_inputs(&workflows, &inputs, strictness)
+}
+
+/// The per-value half of `resolve_list_statuses`, against workflows already
+/// fetched. Values are OR'd, so an unknown label under `Lenient` drops out and
+/// the rest still resolve; the caller decides what an empty result means for the
+/// filter it is building (see `project_tasks`).
+fn resolve_status_inputs(
+    workflows: &[Workflow],
+    inputs: &[&str],
+    strictness: LabelStrictness,
+) -> Result<ResolvedStatuses> {
     let mut resolved = ResolvedStatuses::default();
     for input in inputs {
         let value = match input.parse::<i64>() {
@@ -619,14 +669,27 @@ fn resolve_list_statuses(api: &Api, project: &str, inputs: &[String]) -> Result<
                 resolved.numeric_values.push(value);
                 value
             }
-            Err(_) => {
-                let value = resolve_list_status_label(&workflows, input)?;
-                resolved.labels.push(input.to_string());
-                resolved
-                    .collisions
-                    .extend(status_value_collisions(&workflows, input, value));
-                value
-            }
+            Err(_) => match resolve_list_status_label(workflows, input) {
+                Ok(value) => {
+                    resolved.labels.push(input.to_string());
+                    resolved
+                        .collisions
+                        .extend(status_value_collisions(workflows, input, value));
+                    value
+                }
+                // In a sweep an unknown label just matches nothing here; the
+                // other OR'd values still decide what this project returns
+                Err(error)
+                    if strictness == LabelStrictness::Lenient
+                        && matches!(
+                            error.downcast_ref(),
+                            Some(UnanswerableProject::UnknownStatus(_))
+                        ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            },
         };
         if !resolved.values.contains(&value) {
             resolved.values.push(value);
@@ -863,6 +926,8 @@ struct ProjectTasksQuery<'a> {
     /// Requests to run per project, OR'd together. Normally one; two when
     /// --mentioned-or-assignee is given.
     user_filters: &'a [UserFilters<'a>],
+    /// How to treat a status label this project's workflows do not define.
+    strictness: LabelStrictness,
 }
 
 /// List one project's tasks. `multi` only decides whether warnings name the
@@ -875,13 +940,25 @@ fn project_tasks(
     multi: bool,
 ) -> Result<Vec<Value>> {
     // A status label is defined by the project's workflows, so it is resolved
-    // per project -- the same label can have a different value elsewhere, and an
-    // unknown label is an error rather than a project that silently matches
-    // nothing.
+    // per project -- the same label can have a different value elsewhere, and for
+    // a project the user named an unknown label is an error rather than a project
+    // that silently matches nothing (see LabelStrictness).
     // (--status and --exclude-status are mutually exclusive in clap, so the
     //  workflow is fetched at most once)
-    let status = resolve_list_statuses(api, project, &filter.status)?;
-    let exclude_status = resolve_list_statuses(api, project, &filter.exclude_status)?;
+    let status = resolve_list_statuses(api, project, &filter.status, shared.strictness)?;
+    // An include filter that resolved to nothing selects nothing, so listing the
+    // project would answer a different question than the one asked. Only reachable
+    // when lenient: a strict resolution has already failed on the first label.
+    if !filter.status.is_empty() && status.values.is_empty() {
+        return Err(Error::new(UnanswerableProject::NoStatusResolved(format!(
+            "none of the requested statuses ({}) exist in this project's workflows",
+            filter.status.join(", ")
+        ))));
+    }
+    // An *exclude* filter that resolved to nothing needs no such guard: having
+    // nothing to exclude here is a real answer, not a different question.
+    let exclude_status =
+        resolve_list_statuses(api, project, &filter.exclude_status, shared.strictness)?;
     let has_user_filter = shared
         .user_filters
         .iter()
@@ -1023,6 +1100,11 @@ pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -
                 tracked,
                 exclude_phase: &exclude_phase,
                 user_filters: &user_filters,
+                strictness: if selection.implicit {
+                    LabelStrictness::Lenient
+                } else {
+                    LabelStrictness::Strict
+                },
             },
             multi,
         )
@@ -1751,6 +1833,56 @@ mod tests {
         // the API order is kept: it is the tiebreaker of the merged listing
         assert_eq!(all_project_keys(projects), ["GENERAL", "OLD", "DEV"]);
         assert!(all_project_keys(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_label_is_distinguished_from_an_ambiguous_one() {
+        // only the unknown one may be dropped from an OR'd --status in a sweep;
+        // an ambiguous label cannot be turned into a filter at all
+        let flows = workflows(&[
+            ("default", &[(10, "起案"), (40, "対応中")]),
+            ("review", &[(20, "起案")]),
+        ]);
+        assert!(matches!(
+            resolve_list_status_label(&flows, "draft")
+                .unwrap_err()
+                .downcast_ref(),
+            Some(UnanswerableProject::UnknownStatus(_))
+        ));
+        assert!(matches!(
+            resolve_list_status_label(&flows, "起案")
+                .unwrap_err()
+                .downcast_ref(),
+            Some(UnanswerableProject::AmbiguousStatus(_))
+        ));
+    }
+
+    #[test]
+    fn a_sweep_drops_an_unknown_label_and_keeps_the_other_ord_values() {
+        // "--status draft,起案" over an organization whose projects use different
+        // initial-stage labels: this project only knows 起案, and must still
+        // return its 起案 tasks rather than being dropped entirely
+        let flows = workflows(&[("default", &[(10, "起案"), (40, "対応中")])]);
+        let resolved =
+            resolve_status_inputs(&flows, &["draft", "起案"], LabelStrictness::Lenient).unwrap();
+        assert_eq!(resolved.values, [10]);
+        // only the resolved label is re-filtered client-side
+        assert_eq!(resolved.labels, ["起案"]);
+        // a project named with --project still fails on the unknown label
+        assert!(
+            resolve_status_inputs(&flows, &["draft", "起案"], LabelStrictness::Strict).is_err()
+        );
+        // nothing resolving is not an error here -- project_tasks decides what an
+        // empty include filter means (and lets an empty exclude filter through)
+        let none = resolve_status_inputs(&flows, &["draft"], LabelStrictness::Lenient).unwrap();
+        assert!(none.values.is_empty());
+    }
+
+    #[test]
+    fn a_sweep_still_fails_on_an_ambiguous_label() {
+        // unlike an unknown label this is undecidable, not "matches nothing"
+        let flows = workflows(&[("default", &[(10, "起案")]), ("review", &[(20, "起案")])]);
+        assert!(resolve_status_inputs(&flows, &["起案"], LabelStrictness::Lenient).is_err());
     }
 
     #[test]

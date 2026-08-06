@@ -194,13 +194,14 @@ taskshoot notifications read --all
     (`error: project TEST: unknown status ...`), so a partial list is never mistaken for
     a complete one. A project you asked about must not silently match nothing — drop it
     from the list, or pass the status as a numeric value.
-  - Without `--project`, a project whose workflows do not define the status label is
-    **skipped with a warning on stderr** (`warning: skipped project TEST: unknown status
-    ...`) and the rest are listed, since a label defined by most projects should not be
-    unusable org-wide. Only that class of failure is skipped: a transport or API error
-    still fails the command. If *every* project is skipped, that is not "no tasks
-    matched", so the command exits `1` with the warnings above it — an empty list always
-    means an empty list.
+  - Without `--project`, a status label a project's workflows do not define is simply
+    dropped **for that project**: `--status` values are OR'd, so `--status draft,起案`
+    still returns the `起案` tasks of a project that only knows `起案`. A project is
+    skipped with a warning on stderr only when *none* of the `--status` labels resolve
+    there (the filter would select nothing) or a label is ambiguous within it. Only that
+    class of failure is skipped: a transport or API error still fails the command. If
+    *every* project is skipped, that is not "no tasks matched", so the command exits `1`
+    with the warnings above it — an empty list always means an empty list.
   - The implicit sweep covers archived (inactive) projects too, so nothing is hidden from
     a listing that claims to cover everything.
 - **`--status` / `--exclude-status` accept multiple values** (comma-separated or by

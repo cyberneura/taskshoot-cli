@@ -259,11 +259,19 @@ taskshoot notifications read --all             # mark all read
   `taskshoot projects` returns them (archived projects included — leaving them out would
   hide their tasks from a listing that claims to cover everything). It behaves like
   listing those keys explicitly, with one deliberate difference:
-  - A project whose **workflows do not define a status label** used by `--status` /
-    `--exclude-status` (or define it ambiguously) is **skipped with a warning on stderr**
-    (`warning: skipped project TEST: unknown status ...`) instead of failing the command.
-    Nobody asked about that project by name, and a label most projects define should stay
-    usable org-wide. With an explicit `--project` the same failure is still an error.
+  - A status label a project's **workflows do not define** is dropped for that project
+    rather than failing the command. `--status` values are OR'd, so with
+    `--status draft,起案` a project that only knows `起案` still returns its `起案` tasks
+    — losing them because a *sibling* project uses a different initial-stage label would
+    make a sweep useless across heterogeneous workflows. With an explicit `--project` the
+    same label is still an error.
+  - A project is **skipped with a warning on stderr**
+    (`warning: skipped project TEST: none of the requested statuses (draft) exist ...`)
+    when *none* of the `--status` labels resolve there, so the filter would select
+    nothing, or when a label is **ambiguous** (it maps to different values in different
+    workflows of that project — undecidable rather than "matches nothing"). An
+    `--exclude-status` that resolves to nothing needs no skip: having nothing to exclude
+    is a real answer.
   - **Only that failure is skipped.** A transport error, an API error or an unexpected
     response shape still fails the command, so an outage can never be downgraded to a
     short list that exits `0`.
