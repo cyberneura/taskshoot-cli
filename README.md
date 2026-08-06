@@ -193,6 +193,7 @@ taskshoot category update Defect --project DEV --active false   # hide from the 
 taskshoot tasks --project DEV                  # list tasks
 taskshoot tasks --project DEV,SALES            # several projects merged into one list (OR)
 taskshoot tasks --project DEV --project SALES  # repeating the flag also ORs
+taskshoot tasks                                # no --project: every project in the org
 taskshoot tasks --project DEV --status draft --assignee me
 taskshoot tasks --project DEV --status draft,in-progress    # multiple values are OR'd
 taskshoot tasks --project DEV --status draft --status 40    # repeating the flag also ORs
@@ -253,7 +254,33 @@ taskshoot notifications read --all             # mark all read
     partial list is never printed as if it were complete).
   - The table gains a **PROJECT** column when several projects are listed, since an
     untracked task's ref is a bare UUID and `task show <uuid>` needs `--project`. Output
-    for a single project is unchanged.
+    for a single explicitly named project is unchanged.
+- `tasks` **without `--project` covers every project** of the organization, in the order
+  `taskshoot projects` returns them (archived projects included — leaving them out would
+  hide their tasks from a listing that claims to cover everything). It behaves like
+  listing those keys explicitly, with one deliberate difference:
+  - A status label a project's **workflows do not define** is dropped for that project
+    rather than failing the command. `--status` values are OR'd, so with
+    `--status draft,起案` a project that only knows `起案` still returns its `起案` tasks
+    — losing them because a *sibling* project uses a different initial-stage label would
+    make a sweep useless across heterogeneous workflows. With an explicit `--project` the
+    same label is still an error.
+  - A project is **skipped with a warning on stderr**
+    (`warning: skipped project TEST: none of the requested statuses (draft) exist ...`)
+    when *none* of the `--status` labels resolve there, so the filter would select
+    nothing, or when a label is **ambiguous** (it maps to different values in different
+    workflows of that project — undecidable rather than "matches nothing"). An
+    `--exclude-status` that resolves to nothing needs no skip: having nothing to exclude
+    is a real answer.
+  - **Only that failure is skipped.** A transport error, an API error or an unexpected
+    response shape still fails the command, so an outage can never be downgraded to a
+    short list that exits `0`.
+  - The **PROJECT** column is always shown, even in an organization that happens to
+    have one project: you never typed that key, so a bare UUID ref would otherwise leave
+    you without it.
+  - If **every** project is skipped the command exits `1`
+    (`error: none of the 6 projects could be listed`) rather than printing an empty list:
+    a filter no project can answer and "no tasks matched" must not look alike to a script.
 - `--status` accepts a label (e.g. `in-progress`) or a numeric value (e.g. `40`). For
   single-task operations (`task update`, …) it is resolved against that task's workflow.
   For `tasks --status` (the list filter) it is resolved against all of the project's

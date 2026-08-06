@@ -61,12 +61,15 @@ enum Cmd {
     /// Create / update a task category (requires the manager role or higher)
     #[command(subcommand)]
     Category(CategoryCmd),
-    /// List tasks in a project (or in several, merged)
+    /// List tasks in a project (or in several, merged). Without --project,
+    /// every project of the organization is listed
     Tasks {
         /// Project key. Repeatable and comma-separated; multiple projects are
-        /// OR'd into one list (e.g. --project GENERAL,SALES). --limit then
-        /// applies per project
-        #[arg(long, value_delimiter = ',', required = true)]
+        /// OR'd into one list (e.g. --project GENERAL,SALES). Omit it to cover
+        /// every project, in which case a project whose workflows do not define
+        /// the status label is skipped with a warning instead of failing the
+        /// command. --limit then applies per project
+        #[arg(long, value_delimiter = ',')]
         project: Vec<String>,
         /// Filter by status label (e.g. 起案) or numeric value (server-side).
         /// Repeatable and comma-separated; multiple values are OR'd
@@ -683,8 +686,19 @@ mod tests {
     }
 
     #[test]
-    fn tasks_requires_a_project() {
-        assert!(Cli::try_parse_from(["taskshoot", "tasks"]).is_err());
+    fn tasks_without_a_project_parses_to_an_empty_list() {
+        // no key means "every project"; commands::tasks fills the list in
+        assert!(tasks_projects_of(&["taskshoot", "tasks"]).is_empty());
+        // and the other filters still apply, as this is the bot loop's form
+        assert!(tasks_projects_of(&[
+            "taskshoot",
+            "tasks",
+            "--bot-ready",
+            "true",
+            "--status",
+            "起案"
+        ])
+        .is_empty());
     }
 
     #[test]

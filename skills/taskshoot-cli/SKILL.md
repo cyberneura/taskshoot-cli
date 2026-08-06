@@ -94,6 +94,7 @@ taskshoot categories --project DEV              # task categories (id / name / c
 
 taskshoot tasks --project DEV                   # list tasks
 taskshoot tasks --project DEV,SALES             # several projects merged into one list (OR)
+taskshoot tasks                                 # no --project: every project in the org
 taskshoot tasks --project DEV --status draft --assignee me
 taskshoot tasks --project DEV --status draft,in-progress            # multiple values are OR'd
 taskshoot tasks --project DEV --exclude-status done                # exclude a status (exclusive with --status)
@@ -176,18 +177,33 @@ taskshoot notifications read --all
     is returned as the english value.
 - **`tasks --project` accepts multiple projects** (comma-separated or by repeating the
   flag) and merges them into one newest-first list, so a cross-project sweep no longer
-  needs a shell loop. One request is sent per project, which is why:
+  needs a shell loop. **Omitting `--project` entirely lists every project of the
+  organization**, which is what an agent sweeping "my tasks" wants. One request is sent
+  per project, which is why:
   - `--limit` is **per project** (3 projects can return `3 x limit` tasks).
   - `--status` / `--exclude-status` labels are resolved **per project** (they belong to
-    that project's workflows). A label that a listed project does not define is an error
-    naming it (`error: project TEST: unknown status ...`) — drop that project from the
-    list, or pass the numeric value.
+    that project's workflows).
   - `--assignee` / `--mentioned` are resolved once (a user id is organization-wide).
-  - Any request failing fails the whole command, so a partial list is never mistaken for
-    a complete one. Loop per project instead when you want to tolerate that.
   - The table gains a **PROJECT** column in this mode (an untracked task's ref is a bare
-    UUID, and `task show <uuid>` needs `--project`). Single-project output is unchanged;
-    `--json` is unaffected either way (`project_key` is always in the payload).
+    UUID, and `task show <uuid>` needs `--project`) — including a `--project`-less sweep of
+    an organization with a single project, since you never typed that key. Output for a
+    single explicitly named project is unchanged; `--json` is unaffected either way
+    (`project_key` is always in the payload).
+- **How a failing project is handled depends on whether you named it:**
+  - With `--project`, any failing request fails the whole command
+    (`error: project TEST: unknown status ...`), so a partial list is never mistaken for
+    a complete one. A project you asked about must not silently match nothing — drop it
+    from the list, or pass the status as a numeric value.
+  - Without `--project`, a status label a project's workflows do not define is simply
+    dropped **for that project**: `--status` values are OR'd, so `--status draft,起案`
+    still returns the `起案` tasks of a project that only knows `起案`. A project is
+    skipped with a warning on stderr only when *none* of the `--status` labels resolve
+    there (the filter would select nothing) or a label is ambiguous within it. Only that
+    class of failure is skipped: a transport or API error still fails the command. If
+    *every* project is skipped, that is not "no tasks matched", so the command exits `1`
+    with the warnings above it — an empty list always means an empty list.
+  - The implicit sweep covers archived (inactive) projects too, so nothing is hidden from
+    a listing that claims to cover everything.
 - **`--status` / `--exclude-status` accept multiple values** (comma-separated or by
   repeating the flag) and are OR'd; the two flags are mutually exclusive. Both are
   server-side filters, so they apply *before* `--limit` truncation — more accurate than
