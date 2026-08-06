@@ -56,7 +56,7 @@ check_manifest() {
     fail "$manifest declares '${found:-nothing}' at $filter, but Cargo.toml declares $VERSION"
 }
 check_manifest .claude-plugin/marketplace.json '.plugins[] | select(.name == "taskshoot") | .version'
-check_manifest plugins/taskshoot/.claude-plugin/plugin.json '.version'
+check_manifest .claude-plugin/plugin.json '.version'
 lock_version=$(cargo metadata --format-version 1 --locked >/dev/null 2>&1 && echo ok || echo stale)
 [ "$lock_version" = ok ] || fail "Cargo.lock is out of date; run 'cargo build' and commit it"
 echo "Cargo.toml, both plugin manifests and Cargo.lock all agree on ${VERSION}"
