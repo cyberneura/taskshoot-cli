@@ -185,8 +185,10 @@ taskshoot notifications read --all
     that project's workflows).
   - `--assignee` / `--mentioned` are resolved once (a user id is organization-wide).
   - The table gains a **PROJECT** column in this mode (an untracked task's ref is a bare
-    UUID, and `task show <uuid>` needs `--project`). Single-project output is unchanged;
-    `--json` is unaffected either way (`project_key` is always in the payload).
+    UUID, and `task show <uuid>` needs `--project`) — including a `--project`-less sweep of
+    an organization with a single project, since you never typed that key. Output for a
+    single explicitly named project is unchanged; `--json` is unaffected either way
+    (`project_key` is always in the payload).
 - **How a failing project is handled depends on whether you named it:**
   - With `--project`, any failing request fails the whole command
     (`error: project TEST: unknown status ...`), so a partial list is never mistaken for

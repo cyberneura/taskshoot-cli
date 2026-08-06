@@ -254,7 +254,7 @@ taskshoot notifications read --all             # mark all read
     partial list is never printed as if it were complete).
   - The table gains a **PROJECT** column when several projects are listed, since an
     untracked task's ref is a bare UUID and `task show <uuid>` needs `--project`. Output
-    for a single project is unchanged.
+    for a single explicitly named project is unchanged.
 - `tasks` **without `--project` covers every project** of the organization, in the order
   `taskshoot projects` returns them (archived projects included — leaving them out would
   hide their tasks from a listing that claims to cover everything). It behaves like
@@ -267,6 +267,9 @@ taskshoot notifications read --all             # mark all read
   - **Only that failure is skipped.** A transport error, an API error or an unexpected
     response shape still fails the command, so an outage can never be downgraded to a
     short list that exits `0`.
+  - The **PROJECT** column is always shown, even in an organization that happens to
+    have one project: you never typed that key, so a bare UUID ref would otherwise leave
+    you without it.
   - If **every** project is skipped the command exits `1`
     (`error: none of the 6 projects could be listed`) rather than printing an empty list:
     a filter no project can answer and "no tasks matched" must not look alike to a script.

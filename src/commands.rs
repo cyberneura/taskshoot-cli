@@ -1007,7 +1007,11 @@ pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -
             mentioned_user_id: mentioned_user_id.as_deref(),
         }],
     };
-    let multi = projects.len() > 1;
+    // The PROJECT column exists because an untracked task's ref is a bare UUID
+    // and `task show <uuid>` needs the key. A sweep with no --project needs it
+    // even if the organization happens to have one project: unlike an explicit
+    // single-project listing, the user never typed that key.
+    let multi = projects.len() > 1 || selection.implicit;
     let mut items: Vec<Value> = Vec::new();
     let mut skipped = 0usize;
     for project in &projects {
@@ -1041,8 +1045,10 @@ pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -
         bail!("none of the {skipped} projects could be listed (see the warnings above)");
     }
     // Each project comes back sorted, so the merged list is re-sorted on the
-    // server's own key to read as one list (a single project keeps its order)
-    if multi {
+    // server's own key to read as one list (a single project keeps its order,
+    // which is why this asks how many projects there are rather than reusing
+    // `multi` -- that one is about labelling the output, not merging it)
+    if projects.len() > 1 {
         sort_tasks_newest_first(&mut items);
     }
 
