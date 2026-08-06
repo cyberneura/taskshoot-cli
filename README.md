@@ -373,7 +373,7 @@ which additionally lets `/plugin` manage updates:
 Both routes install the same files — pick whichever your agent supports. Neither
 installs the `taskshoot` binary itself; see [Installation](#installation) for that.
 
-> **Moved after 0.3.0**: the skills used to live in `plugins/taskshoot/skills/`, which is not
+> **Moved in 0.4.0**: the skills used to live in `plugins/taskshoot/skills/`, which is not
 > a path `npx skills` looks in. They are now at `skills/` in the repository root, and the
 > plugin manifest moved with them to `.claude-plugin/plugin.json` (the marketplace entry's
 > `source` is `"./"`). Plugin users get the new layout on the next release; anyone who
