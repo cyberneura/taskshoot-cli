@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -459,6 +460,7 @@ pub struct TasksFilter {
     pub exclude_phase: Vec<String>,
     pub assignee: Option<String>,
     pub mentioned: Option<String>,
+    pub mentioned_or_assignee: Option<String>,
     pub untracked: bool,
     pub tracked: bool,
     pub bot_ready: Option<bool>,
@@ -755,12 +757,35 @@ fn sort_tasks_newest_first(tasks: &mut [Value]) {
     tasks.sort_by_key(|task| std::cmp::Reverse(task_sort_key(task)));
 }
 
+/// Drop tasks already present in the list, keeping the first occurrence. Only
+/// needed where the same task can come back from more than one request (a task
+/// assigned to a user can also mention them), so the ids are compared as they
+/// arrive rather than by re-parsing into a Task.
+fn dedupe_tasks_by_id(tasks: &mut Vec<Value>) {
+    let mut seen: HashSet<String> = HashSet::new();
+    tasks.retain(|task| match task["id"].as_str() {
+        // A task with no id cannot be recognized as a duplicate, so keep it
+        // rather than silently dropping everything after the first.
+        None => true,
+        Some(id) => seen.insert(id.to_string()),
+    });
+}
+
+/// The user filters of one request: the API has no OR between them, so
+/// "assignee OR mentioned" is issued as two requests and merged client-side.
+#[derive(Clone, Copy)]
+struct UserFilters<'a> {
+    assignee_id: Option<&'a str>,
+    mentioned_user_id: Option<&'a str>,
+}
+
 /// The part of a task listing that is resolved once for every project.
 struct ProjectTasksQuery<'a> {
     tracked: Option<bool>,
     exclude_phase: &'a [String],
-    assignee_id: Option<&'a str>,
-    mentioned_user_id: Option<&'a str>,
+    /// Requests to run per project, OR'd together. Normally one; two when
+    /// --mentioned-or-assignee is given.
+    user_filters: &'a [UserFilters<'a>],
 }
 
 /// List one project's tasks. `multi` only decides whether warnings name the
@@ -780,11 +805,14 @@ fn project_tasks(
     //  workflow is fetched at most once)
     let status = resolve_list_statuses(api, project, &filter.status)?;
     let exclude_status = resolve_list_statuses(api, project, &filter.exclude_status)?;
+    let has_user_filter = shared
+        .user_filters
+        .iter()
+        .any(|f| f.assignee_id.is_some() || f.mentioned_user_id.is_some());
     let has_filter = !status.is_empty()
         || !exclude_status.is_empty()
         || !shared.exclude_phase.is_empty()
-        || shared.assignee_id.is_some()
-        || shared.mentioned_user_id.is_some()
+        || has_user_filter
         || filter.bot_ready.is_some();
     // exclude drops by numeric value on the server, so tasks with a different
     // label sharing that value are swept in too. The client cannot restore them
@@ -802,23 +830,35 @@ fn project_tasks(
         .limit
         .unwrap_or(if has_filter { 500 } else { 200 })
         .clamp(1, 500);
-    let value = api.tasks(
-        project,
-        &TasksQuery {
-            tracked: shared.tracked,
-            limit,
-            status: status.values.clone(),
-            exclude_status: exclude_status.values,
-            exclude_phase: shared.exclude_phase.to_vec(),
-            assignee_id: shared.assignee_id.map(str::to_string),
-            mentioned_user_id: shared.mentioned_user_id.map(str::to_string),
-            bot_ready: filter.bot_ready,
-        },
-    )?;
     // Keep raw API fields for --json, so handle it as Value
-    let mut items: Vec<Value> = from_value(value)?;
-    // If exactly `limit` items came back, older matching tasks may have been cut off
-    if items.len() as u32 >= limit {
+    let mut items: Vec<Value> = Vec::new();
+    let mut truncated = false;
+    for user_filter in shared.user_filters {
+        let value = api.tasks(
+            project,
+            &TasksQuery {
+                tracked: shared.tracked,
+                limit,
+                status: status.values.clone(),
+                exclude_status: exclude_status.values.clone(),
+                exclude_phase: shared.exclude_phase.to_vec(),
+                assignee_id: user_filter.assignee_id.map(str::to_string),
+                mentioned_user_id: user_filter.mentioned_user_id.map(str::to_string),
+                bot_ready: filter.bot_ready,
+            },
+        )?;
+        let mut page: Vec<Value> = from_value(value)?;
+        // If exactly `limit` items came back, older matching tasks may have been cut off
+        truncated |= page.len() as u32 >= limit;
+        items.append(&mut page);
+    }
+    // The two halves of an OR overlap (a task can both be assigned to the user
+    // and mention them), and each half is only sorted within itself.
+    if shared.user_filters.len() > 1 {
+        dedupe_tasks_by_id(&mut items);
+        sort_tasks_newest_first(&mut items);
+    }
+    if truncated {
         let scope = if multi {
             format!(" of {project}")
         } else {
@@ -866,6 +906,29 @@ pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -
         Some(mentioned) => Some(resolve_user_id_for_projects(api, &projects, mentioned)?),
         None => None,
     };
+    // --mentioned-or-assignee is the union of the two filters above. The API
+    // applies its filters with AND only, so it is sent as two requests whose
+    // results are merged per project (see project_tasks).
+    let mentioned_or_assignee_id = match &filter.mentioned_or_assignee {
+        Some(user) => Some(resolve_user_id_for_projects(api, &projects, user)?),
+        None => None,
+    };
+    let user_filters = match mentioned_or_assignee_id.as_deref() {
+        Some(user_id) => vec![
+            UserFilters {
+                assignee_id: Some(user_id),
+                mentioned_user_id: None,
+            },
+            UserFilters {
+                assignee_id: None,
+                mentioned_user_id: Some(user_id),
+            },
+        ],
+        None => vec![UserFilters {
+            assignee_id: assignee_id.as_deref(),
+            mentioned_user_id: mentioned_user_id.as_deref(),
+        }],
+    };
     let multi = projects.len() > 1;
     let mut items: Vec<Value> = Vec::new();
     for project in &projects {
@@ -876,8 +939,7 @@ pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -
             &ProjectTasksQuery {
                 tracked,
                 exclude_phase: &exclude_phase,
-                assignee_id: assignee_id.as_deref(),
-                mentioned_user_id: mentioned_user_id.as_deref(),
+                user_filters: &user_filters,
             },
             multi,
         )
@@ -1741,5 +1803,51 @@ mod tests {
         let row = task_row(&row_task(None), true);
         assert_eq!(row[0], "019f31d1-0000-0000-0000-0000000000ff");
         assert_eq!(row[1], "SALES");
+    }
+
+    fn ids_of(tasks: &[Value]) -> Vec<&str> {
+        tasks
+            .iter()
+            .map(|t| t["id"].as_str().unwrap_or(""))
+            .collect()
+    }
+
+    #[test]
+    fn merging_an_or_keeps_the_first_copy_of_a_task_matched_twice() {
+        // the assigned half and the mentioned half of --mentioned-or-assignee
+        // both return a task that is assigned to the user and mentions them
+        let mut tasks = vec![
+            json!({"id": "a"}),
+            json!({"id": "b"}),
+            json!({"id": "a"}),
+            json!({"id": "c"}),
+        ];
+        dedupe_tasks_by_id(&mut tasks);
+        assert_eq!(ids_of(&tasks), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn merging_keeps_rows_that_carry_no_id() {
+        // an unrecognizable row is kept rather than folded into one another
+        let mut tasks = vec![json!({}), json!({"id": "a"}), json!({})];
+        dedupe_tasks_by_id(&mut tasks);
+        assert_eq!(tasks.len(), 3);
+    }
+
+    #[test]
+    fn a_merged_or_listing_is_ordered_newest_first() {
+        // each half comes back sorted on its own, so the union is re-sorted on
+        // the server's key (-latest_event_at, -created_at)
+        let mut tasks = vec![
+            json!({"id": "old", "latest_event_at": "2026-08-01T00:00:00Z",
+                   "created_at": "2026-07-01T00:00:00Z"}),
+            json!({"id": "new", "latest_event_at": "2026-08-05T09:00:00Z",
+                   "created_at": "2026-07-02T00:00:00Z"}),
+            // no event yet: created_at stands in for latest_event_at
+            json!({"id": "mid", "latest_event_at": null,
+                   "created_at": "2026-08-03T00:00:00Z"}),
+        ];
+        sort_tasks_newest_first(&mut tasks);
+        assert_eq!(ids_of(&tasks), ["new", "mid", "old"]);
     }
 }
