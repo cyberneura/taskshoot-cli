@@ -454,6 +454,15 @@ fn resolve_category_id(api: &Api, project: &str, spec: &str) -> Result<Option<St
     }
 }
 
+/// How `tasks` reports its result. Both fields are output modes rather than
+/// filters, so they are grouped here instead of in `TasksFilter`.
+#[derive(Clone, Copy)]
+pub struct TasksOutput {
+    pub json: bool,
+    /// Print only the number of matching tasks
+    pub count: bool,
+}
+
 pub struct TasksFilter {
     pub status: Vec<String>,
     pub exclude_status: Vec<String>,
@@ -1040,7 +1049,12 @@ fn project_tasks(
     Ok(items)
 }
 
-pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -> Result<()> {
+pub fn tasks(
+    api: &Api,
+    projects: &[String],
+    filter: &TasksFilter,
+    output: TasksOutput,
+) -> Result<()> {
     let selection = resolve_project_keys(api, projects)?;
     let projects = selection.keys;
     let tracked = if filter.untracked {
@@ -1134,7 +1148,19 @@ pub fn tasks(api: &Api, projects: &[String], filter: &TasksFilter, json: bool) -
         sort_tasks_newest_first(&mut items);
     }
 
-    if json {
+    // Only the size of the same list the command would otherwise print. It is
+    // placed after the skipped-projects bail above on purpose: a caller that
+    // branches on "0" must not read a failed query as "no work to do".
+    if output.count {
+        let count = items.len();
+        if output.json {
+            return print_json(&json!({ "count": count }));
+        }
+        println!("{count}");
+        return Ok(());
+    }
+
+    if output.json {
         return print_json(&Value::Array(items));
     }
     let rows: Vec<Vec<String>> = items

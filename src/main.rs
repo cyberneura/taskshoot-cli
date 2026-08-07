@@ -116,6 +116,13 @@ enum Cmd {
         /// mentioned-or-assignee or bot-ready filter is used)
         #[arg(long)]
         limit: Option<u32>,
+        /// Print only how many tasks matched, instead of the list. Prints the
+        /// bare number, or {"count": N} with --json. Useful to decide whether
+        /// there is any work before handing the list to an AI agent. The count
+        /// is what the same command would list, so it is capped by --limit
+        /// (a truncated result still warns on stderr)
+        #[arg(long)]
+        count: bool,
     },
     /// Search tasks across the organization (hybrid bigram + vector search)
     Search {
@@ -451,6 +458,7 @@ fn run() -> Result<()> {
             tracked,
             bot_ready,
             limit,
+            count,
         } => commands::tasks(
             &api,
             &project,
@@ -466,7 +474,9 @@ fn run() -> Result<()> {
                 bot_ready,
                 limit,
             },
-            json,
+            // json and count are both output modes; a struct keeps them from
+            // being swapped at the call site
+            commands::TasksOutput { json, count },
         ),
         Cmd::Search { query, limit } => commands::search(&api, &query, limit, json),
         Cmd::Task(task_cmd) => match *task_cmd {
@@ -730,6 +740,38 @@ mod tests {
             "me",
         ])
         .is_ok());
+    }
+
+    fn tasks_count_flag_of(args: &[&str]) -> bool {
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Tasks { count, .. } => count,
+            _ => panic!("expected the tasks command"),
+        }
+    }
+
+    #[test]
+    fn tasks_count_defaults_to_off_and_combines_with_the_filters() {
+        assert!(!tasks_count_flag_of(&["taskshoot", "tasks"]));
+        // the form an agent uses to decide whether there is any work at all
+        assert!(tasks_count_flag_of(&[
+            "taskshoot",
+            "tasks",
+            "--bot-ready",
+            "true",
+            "--status",
+            "起案",
+            "--mentioned-or-assignee",
+            "me",
+            "--count",
+        ]));
+        // --count reports on the same list, so it is not exclusive with --json
+        // (that pair is what makes the output machine readable)
+        assert!(tasks_count_flag_of(&[
+            "taskshoot",
+            "tasks",
+            "--count",
+            "--json"
+        ]));
     }
 
     #[test]
