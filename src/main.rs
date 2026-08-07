@@ -62,13 +62,14 @@ enum Cmd {
     #[command(subcommand)]
     Category(CategoryCmd),
     /// List tasks in a project (or in several, merged). Without --project,
-    /// every project of the organization is listed
+    /// every non-archived project of the organization is listed
     Tasks {
         /// Project key. Repeatable and comma-separated; multiple projects are
         /// OR'd into one list (e.g. --project GENERAL,SALES). Omit it to cover
-        /// every project, in which case a project whose workflows do not define
-        /// the status label is skipped with a warning instead of failing the
-        /// command. --limit then applies per project
+        /// every non-archived project (see --include-archived-projects), in
+        /// which case a project whose workflows do not define the status label
+        /// is skipped with a warning instead of failing the command. --limit
+        /// then applies per project
         #[arg(long, value_delimiter = ',')]
         project: Vec<String>,
         /// Filter by status label (e.g. 起案) or numeric value (server-side).
@@ -111,6 +112,11 @@ enum Cmd {
         /// Filter by Bot Ready flag (true/false); bot loops use --bot-ready true
         #[arg(long)]
         bot_ready: Option<bool>,
+        /// Also sweep archived projects, which are skipped by default. Rejected
+        /// together with --project, which always lists the project it names,
+        /// archived or not
+        #[arg(long, conflicts_with = "project")]
+        include_archived_projects: bool,
         /// Max tasks returned per project and per request (1-500; default 200,
         /// or 500 when a status, phase, assignee, mentioned,
         /// mentioned-or-assignee or bot-ready filter is used)
@@ -457,11 +463,15 @@ fn run() -> Result<()> {
             untracked,
             tracked,
             bot_ready,
+            include_archived_projects,
             limit,
             count,
         } => commands::tasks(
             &api,
-            &project,
+            &commands::ProjectScope {
+                projects: project,
+                include_archived: include_archived_projects,
+            },
             &commands::TasksFilter {
                 status,
                 exclude_status,
@@ -740,6 +750,36 @@ mod tests {
             "me",
         ])
         .is_ok());
+    }
+
+    fn tasks_include_archived_of(args: &[&str]) -> bool {
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Tasks {
+                include_archived_projects,
+                ..
+            } => include_archived_projects,
+            _ => panic!("expected the tasks command"),
+        }
+    }
+
+    #[test]
+    fn tasks_include_archived_projects_only_applies_to_a_sweep() {
+        assert!(!tasks_include_archived_of(&["taskshoot", "tasks"]));
+        assert!(tasks_include_archived_of(&[
+            "taskshoot",
+            "tasks",
+            "--include-archived-projects",
+        ]));
+        // an explicit --project always lists that project, archived or not, so
+        // the flag would have nothing to widen -- reject it instead of ignoring it
+        assert!(Cli::try_parse_from([
+            "taskshoot",
+            "tasks",
+            "--project",
+            "OLD",
+            "--include-archived-projects",
+        ])
+        .is_err());
     }
 
     fn tasks_count_flag_of(args: &[&str]) -> bool {

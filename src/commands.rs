@@ -463,6 +463,16 @@ pub struct TasksOutput {
     pub count: bool,
 }
 
+/// Which projects a listing covers. Not a task filter: it decides which
+/// projects are asked, not which of their tasks match.
+pub struct ProjectScope {
+    /// The `--project` values; empty means "sweep the organization".
+    pub projects: Vec<String>,
+    /// Whether an organization sweep also covers archived projects. Only
+    /// meaningful when `projects` is empty (clap rejects the combination).
+    pub include_archived: bool,
+}
+
 pub struct TasksFilter {
     pub status: Vec<String>,
     pub exclude_status: Vec<String>,
@@ -720,15 +730,27 @@ struct ProjectSelection {
 
 /// Decide which projects to list: the ones given, or the whole organization when
 /// `--project` is omitted.
-fn resolve_project_keys(api: &Api, projects: &[String]) -> Result<ProjectSelection> {
+fn resolve_project_keys(
+    api: &Api,
+    projects: &[String],
+    include_archived: bool,
+) -> Result<ProjectSelection> {
     if !projects.is_empty() {
         return Ok(ProjectSelection {
             keys: normalize_project_keys(projects)?,
             implicit: false,
         });
     }
-    let keys = all_project_keys(from_value(api.projects()?)?);
+    let all: Vec<Project> = from_value(api.projects()?)?;
+    let had_any = !all.is_empty();
+    let keys = all_project_keys(all, include_archived);
     if keys.is_empty() {
+        if had_any && !include_archived {
+            bail!(
+                "every project of the organization is archived; \
+                 pass --include-archived-projects to sweep them"
+            );
+        }
         bail!("the organization has no project");
     }
     Ok(ProjectSelection {
@@ -740,11 +762,17 @@ fn resolve_project_keys(api: &Api, projects: &[String]) -> Result<ProjectSelecti
 /// Every project of the organization, in the order the API returned them (which
 /// is the tiebreaker of the merged listing).
 ///
-/// Inactive (archived) projects are kept: leaving them out would hide their tasks
-/// from a sweep that says it covers everything, and an archived project simply
-/// returns few or no tasks.
-fn all_project_keys(projects: Vec<Project>) -> Vec<String> {
-    projects.into_iter().map(|p| p.key).collect()
+/// Inactive (archived) projects are left out unless `include_archived`: a sweep
+/// looks for work in progress, and an archived project holds none while still
+/// costing a request (two with --mentioned-or-assignee) and padding the result.
+/// An explicit `--project` never reaches here, so an archived project stays
+/// listable by name.
+fn all_project_keys(projects: Vec<Project>, include_archived: bool) -> Vec<String> {
+    projects
+        .into_iter()
+        .filter(|p| include_archived || p.active)
+        .map(|p| p.key)
+        .collect()
 }
 
 /// Whether a project's failure should drop it from the listing instead of failing
@@ -1051,11 +1079,11 @@ fn project_tasks(
 
 pub fn tasks(
     api: &Api,
-    projects: &[String],
+    scope: &ProjectScope,
     filter: &TasksFilter,
     output: TasksOutput,
 ) -> Result<()> {
-    let selection = resolve_project_keys(api, projects)?;
+    let selection = resolve_project_keys(api, &scope.projects, scope.include_archived)?;
     let projects = selection.keys;
     let tracked = if filter.untracked {
         Some(false)
@@ -1849,16 +1877,25 @@ mod tests {
     }
 
     #[test]
-    fn an_omitted_project_covers_every_project_including_archived_ones() {
-        let projects: Vec<Project> = from_value(json!([
-            {"key": "GENERAL", "name": "general", "is_default": true},
-            {"key": "OLD", "name": "archived", "active": false},
-            {"key": "DEV", "name": "dev"},
-        ]))
-        .unwrap();
-        // the API order is kept: it is the tiebreaker of the merged listing
-        assert_eq!(all_project_keys(projects), ["GENERAL", "OLD", "DEV"]);
-        assert!(all_project_keys(Vec::new()).is_empty());
+    fn an_omitted_project_skips_archived_projects_unless_asked() {
+        let projects = || -> Vec<Project> {
+            from_value(json!([
+                {"key": "GENERAL", "name": "general", "is_default": true},
+                {"key": "OLD", "name": "archived", "active": false},
+                {"key": "DEV", "name": "dev"},
+            ]))
+            .unwrap()
+        };
+        // the API order is kept: it is the tiebreaker of the merged listing.
+        // GENERAL and DEV carry no `active` field and still survive the filter:
+        // a project sent without it is active (default_true), not archived
+        assert_eq!(all_project_keys(projects(), false), ["GENERAL", "DEV"]);
+        assert_eq!(
+            all_project_keys(projects(), true),
+            ["GENERAL", "OLD", "DEV"]
+        );
+        // an organization with no project at all
+        assert!(all_project_keys(Vec::new(), false).is_empty());
     }
 
     #[test]
