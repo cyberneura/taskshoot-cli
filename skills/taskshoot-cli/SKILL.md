@@ -94,7 +94,8 @@ taskshoot categories --project DEV              # task categories (id / name / c
 
 taskshoot tasks --project DEV                   # list tasks
 taskshoot tasks --project DEV,SALES             # several projects merged into one list (OR)
-taskshoot tasks                                 # no --project: every project in the org
+taskshoot tasks                                 # no --project: every non-archived project in the org
+taskshoot tasks --include-archived-projects     # ... archived ones too
 taskshoot tasks --project DEV --status draft --assignee me
 taskshoot tasks --project DEV --status draft,in-progress            # multiple values are OR'd
 taskshoot tasks --project DEV --exclude-status done                # exclude a status (exclusive with --status)
@@ -179,9 +180,11 @@ taskshoot notifications read --all
     is returned as the english value.
 - **`tasks --project` accepts multiple projects** (comma-separated or by repeating the
   flag) and merges them into one newest-first list, so a cross-project sweep no longer
-  needs a shell loop. **Omitting `--project` entirely lists every project of the
-  organization**, which is what an agent sweeping "my tasks" wants. One request is sent
-  per project, which is why:
+  needs a shell loop. **Omitting `--project` entirely lists every non-archived project of
+  the organization**, which is what an agent sweeping "my tasks" wants. Archived
+  (`inactive`) projects are skipped; pass `--include-archived-projects` to cover them too
+  (rejected together with `--project`, which always lists the named project either way).
+  One request is sent per project, which is why:
   - `--limit` is **per project** (3 projects can return `3 x limit` tasks).
   - `--status` / `--exclude-status` labels are resolved **per project** (they belong to
     that project's workflows).
@@ -204,8 +207,9 @@ taskshoot notifications read --all
     class of failure is skipped: a transport or API error still fails the command. If
     *every* project is skipped, that is not "no tasks matched", so the command exits `1`
     with the warnings above it — an empty list always means an empty list.
-  - The implicit sweep covers archived (inactive) projects too, so nothing is hidden from
-    a listing that claims to cover everything.
+  - The implicit sweep skips archived (inactive) projects unless
+    `--include-archived-projects` is given; if *every* project of the organization is
+    archived, the command fails and says so rather than reporting an empty list.
 - **`--status` / `--exclude-status` accept multiple values** (comma-separated or by
   repeating the flag) and are OR'd; the two flags are mutually exclusive. Both are
   server-side filters, so they apply *before* `--limit` truncation — more accurate than

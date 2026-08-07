@@ -193,7 +193,8 @@ taskshoot category update Defect --project DEV --active false   # hide from the 
 taskshoot tasks --project DEV                  # list tasks
 taskshoot tasks --project DEV,SALES            # several projects merged into one list (OR)
 taskshoot tasks --project DEV --project SALES  # repeating the flag also ORs
-taskshoot tasks                                # no --project: every project in the org
+taskshoot tasks                                # no --project: every non-archived project in the org
+taskshoot tasks --include-archived-projects    # ... archived ones too
 taskshoot tasks --project DEV --status draft --assignee me
 taskshoot tasks --project DEV --status draft,in-progress    # multiple values are OR'd
 taskshoot tasks --project DEV --status draft --status 40    # repeating the flag also ORs
@@ -257,10 +258,13 @@ taskshoot notifications read --all             # mark all read
   - The table gains a **PROJECT** column when several projects are listed, since an
     untracked task's ref is a bare UUID and `task show <uuid>` needs `--project`. Output
     for a single explicitly named project is unchanged.
-- `tasks` **without `--project` covers every project** of the organization, in the order
-  `taskshoot projects` returns them (archived projects included — leaving them out would
-  hide their tasks from a listing that claims to cover everything). It behaves like
-  listing those keys explicitly, with one deliberate difference:
+- `tasks` **without `--project` covers every non-archived project** of the organization, in
+  the order `taskshoot projects` returns them. Archived (`inactive`) projects are left out:
+  each one costs a request (two with `--mentioned-or-assignee`) to return tasks nobody works
+  on. Add **`--include-archived-projects`** to sweep them too. The flag only widens a sweep,
+  so it is rejected together with `--project` — a project named explicitly is always listed,
+  archived or not. It behaves like listing those keys explicitly, with one deliberate
+  difference:
   - A status label a project's **workflows do not define** is dropped for that project
     rather than failing the command. `--status` values are OR'd, so with
     `--status draft,起案` a project that only knows `起案` still returns its `起案` tasks
@@ -283,6 +287,8 @@ taskshoot notifications read --all             # mark all read
   - If **every** project is skipped the command exits `1`
     (`error: none of the 6 projects could be listed`) rather than printing an empty list:
     a filter no project can answer and "no tasks matched" must not look alike to a script.
+    An organization whose projects are *all* archived fails the same way, naming
+    `--include-archived-projects` as the way to see them.
 - `tasks --count` prints **only how many tasks matched** (a bare number, or `{"count": N}`
   with `--json`) instead of the list. It is meant for deciding whether there is any work
   before handing the list to an AI agent, so an agent is not started for an empty result.
