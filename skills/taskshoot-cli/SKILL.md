@@ -103,6 +103,8 @@ taskshoot tasks --project DEV --mentioned me    # tasks that @-mention you
 taskshoot tasks --project DEV --mentioned-or-assignee me   # assigned to you OR @-mentioning you
 taskshoot tasks --project DEV --bot-ready true  # only tasks a bot may pick up
 taskshoot tasks --project DEV --untracked       # casual (numberless) tasks only
+taskshoot tasks --bot-ready true --count        # just the number of matches (prints "3")
+taskshoot tasks --bot-ready true --count --json # {"count": 3}
 
 taskshoot search "search index"                 # org-wide task search (--limit 1-50)
 taskshoot search DEV-12                          # a KEY-number reference matches directly

@@ -204,6 +204,8 @@ taskshoot tasks --project DEV --mentioned suzuki   # a specific person (handle /
 taskshoot tasks --project DEV --mentioned-or-assignee me   # assigned to you OR @-mentioning you
 taskshoot tasks --project DEV --untracked      # casual tasks only
 taskshoot tasks --project DEV --bot-ready true # only tasks a bot may pick up
+taskshoot tasks --project DEV --bot-ready true --count         # just how many matched (prints "3")
+taskshoot tasks --bot-ready true --count --json                # {"count": 3}
 
 taskshoot search "search index"                # org-wide task search (--limit 1-50)
 taskshoot search DEV-12                         # a KEY-number reference matches directly
@@ -281,6 +283,16 @@ taskshoot notifications read --all             # mark all read
   - If **every** project is skipped the command exits `1`
     (`error: none of the 6 projects could be listed`) rather than printing an empty list:
     a filter no project can answer and "no tasks matched" must not look alike to a script.
+- `tasks --count` prints **only how many tasks matched** (a bare number, or `{"count": N}`
+  with `--json`) instead of the list. It is meant for deciding whether there is any work
+  before handing the list to an AI agent, so an agent is not started for an empty result.
+  - It counts **the same list the command would otherwise print**: every filter applies,
+    the union of `--mentioned-or-assignee` is de-duplicated first, and the count is
+    therefore capped by `--limit` (per project). A truncated result still warns on stderr,
+    so a count equal to the limit should be read as "at least this many".
+  - The skip / failure rules above are unchanged, so a failed query still exits non-zero
+    instead of printing `0`. **`0` always means "no task matched", never "the query broke"**
+    — which is what makes it safe to branch on.
 - `--status` accepts a label (e.g. `in-progress`) or a numeric value (e.g. `40`). For
   single-task operations (`task update`, …) it is resolved against that task's workflow.
   For `tasks --status` (the list filter) it is resolved against all of the project's
