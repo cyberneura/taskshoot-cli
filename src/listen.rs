@@ -23,9 +23,10 @@
 
 use std::fs;
 use std::io::Write;
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
@@ -65,6 +66,15 @@ const READ_POLL: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_IO_TIMEOUT: Duration = Duration::from_secs(20);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+// A worker that missed the deadline is cancelled (see `establish`), but the one
+// step that cannot be cancelled is the name lookup: it is the OS resolver's to
+// end. This caps how many such workers may be outstanding at once, so a
+// resolver that never answers costs a fixed number of threads for the life of
+// the process instead of one more per reconnect.
+const MAX_CONNECT_WORKERS: usize = 4;
+
+/// Connect workers that have been started and have not returned yet.
+static CONNECT_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
@@ -659,30 +669,55 @@ enum ConnectFailure {
 /// one would hand the key to whatever host the `Location` named.
 ///
 /// It runs on its own thread only so that the deadline can cover the phase as a
-/// whole. None of the three steps is cancellable -- a resolver lookup and a
-/// blocking upgrade both run to completion -- so a deadline miss abandons the
-/// thread instead of stopping it. That is bounded rather than a leak: the
-/// per-operation timeouts make an abandoned attempt fail on its own, and one
-/// that instead succeeds finds the receiver gone and drops the connection.
+/// whole. Missing the deadline therefore leaves a worker behind, and that worker
+/// has to be stopped rather than merely dropped: a peer that trickles handshake
+/// bytes just often enough to keep resetting the per-operation timeouts would
+/// otherwise park a thread and a socket for as long as it liked, one more per
+/// retry. So the worker publishes a duplicate of its socket in `cancel`, and a
+/// deadline miss shuts that duplicate down, which fails the read or write the
+/// worker is blocked in.
+///
+/// What remains uncancellable is the name lookup, which belongs to the OS
+/// resolver and ends when it says so. `MAX_CONNECT_WORKERS` bounds that case:
+/// once that many attempts are outstanding, this fails immediately instead of
+/// starting one more.
 fn establish(
     host: String,
     port: u16,
     request: Request<()>,
     deadline: Duration,
 ) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, ConnectFailure> {
+    let worker =
+        ConnectWorker::acquire(&CONNECT_WORKERS, MAX_CONNECT_WORKERS).ok_or_else(|| {
+            ConnectFailure::Failed(format!(
+                "{MAX_CONNECT_WORKERS} earlier connect attempts are still blocked"
+            ))
+        })?;
+
     let (sender, receiver) = mpsc::channel();
+    let cancel: CancelSlot = Arc::new(Mutex::new(Cancellation::Pending));
+    let worker_cancel = Arc::clone(&cancel);
     std::thread::Builder::new()
         .name("taskshoot-connect".into())
         .spawn(move || {
-            let _ = sender.send(connect_and_upgrade(&host, port, request));
+            // Held for the whole attempt so the slot is only released once this
+            // worker really is gone, abandoned or not.
+            let _worker = worker;
+            let _ = sender.send(connect_and_upgrade(&host, port, request, &worker_cancel));
         })
         .map_err(|e| ConnectFailure::Failed(format!("cannot start the connect thread: {e}")))?;
 
     match receiver.recv_timeout(deadline) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(ConnectFailure::Failed(format!(
-            "no connection within {deadline:?}"
-        ))),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // Nothing worth saving if the worker did get a socket: this attempt
+            // is failed either way, so a connection that completed in the same
+            // instant is one this caller has already stopped waiting for.
+            cancel_attempt(&cancel);
+            Err(ConnectFailure::Failed(format!(
+                "no connection within {deadline:?}"
+            )))
+        }
         // The sender was dropped without sending, which only a panic does; its
         // message is already on stderr.
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(ConnectFailure::Failed(
@@ -691,11 +726,94 @@ fn establish(
     }
 }
 
+/// How a connect worker and its deadline hand cancellation to each other.
+///
+/// A plain "socket or nothing" slot would lose the race where the deadline
+/// fires while the worker is between the TCP connect and publishing its
+/// duplicate: the deadline would find nothing to shut down, and the socket
+/// arriving a moment later would have no one left to shut it down. Recording
+/// the cancellation means whichever side is second does the shutting down.
+enum Cancellation {
+    /// The attempt is still wanted and has no socket yet.
+    Pending,
+    /// The socket to shut down if the deadline gives up on this attempt.
+    Socket(TcpStream),
+    /// The deadline already gave up.
+    Cancelled,
+}
+
+/// Shared between [`establish`] and its connect worker.
+type CancelSlot = Arc<Mutex<Cancellation>>;
+
+/// Lock a [`CancelSlot`], reading through a poisoned lock.
+///
+/// Poisoning means the connect worker panicked mid-attempt, which is exactly
+/// when its socket most needs shutting down.
+fn lock_cancel(cancel: &CancelSlot) -> std::sync::MutexGuard<'_, Cancellation> {
+    cancel
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Give up on the attempt, shutting its socket down if it has published one.
+fn cancel_attempt(cancel: &CancelSlot) {
+    let taken = std::mem::replace(&mut *lock_cancel(cancel), Cancellation::Cancelled);
+    if let Cancellation::Socket(stream) = taken {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+}
+
+/// Offer the socket up for cancellation.
+///
+/// `false` means the deadline gave up first, so the socket was shut down here
+/// instead of stored and the attempt should stop.
+fn publish_socket(cancel: &CancelSlot, stream: TcpStream) -> bool {
+    let mut slot = lock_cancel(cancel);
+    if matches!(*slot, Cancellation::Cancelled) {
+        drop(slot);
+        let _ = stream.shutdown(Shutdown::Both);
+        return false;
+    }
+    *slot = Cancellation::Socket(stream);
+    true
+}
+
+/// A permit to run one connect worker, released when the worker returns.
+///
+/// Counting live workers rather than abandoned ones keeps the bookkeeping on
+/// the worker itself, which is the only side that knows when it is really done.
+struct ConnectWorker(&'static AtomicUsize);
+
+impl ConnectWorker {
+    /// `None` once `max` workers are already running, which only happens when
+    /// earlier attempts are stuck somewhere uncancellable.
+    fn acquire(counter: &'static AtomicUsize, max: usize) -> Option<Self> {
+        let mut live = counter.load(Ordering::Acquire);
+        loop {
+            if live >= max {
+                return None;
+            }
+            match counter.compare_exchange_weak(live, live + 1, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return Some(Self(counter)),
+                Err(actual) => live = actual,
+            }
+        }
+    }
+}
+
+impl Drop for ConnectWorker {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// The blocking half of [`establish`], run on its own thread.
 fn connect_and_upgrade(
     host: &str,
     port: u16,
     request: Request<()>,
+    cancel: &CancelSlot,
 ) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, ConnectFailure> {
     let stream = connect_with_timeout(host, port)
         .map_err(|e| ConnectFailure::Failed(format!("cannot connect: {e:#}")))?;
@@ -705,6 +823,27 @@ fn connect_and_upgrade(
     // -- alive indefinitely after the deadline gave up on it.
     set_stream_timeouts(&stream, HANDSHAKE_IO_TIMEOUT)
         .map_err(|e| ConnectFailure::Failed(format!("cannot bound the handshake: {e:#}")))?;
+    // Publish before the upgrade is written, because from here on every way
+    // this can block is a read or a write on this socket -- which is what
+    // shutting the duplicate down ends. A duplicate that outlives the attempt
+    // costs a descriptor until it is dropped; closing it does not close the
+    // connection the caller was handed.
+    match stream.try_clone() {
+        Ok(handle) => {
+            if !publish_socket(cancel, handle) {
+                return Err(ConnectFailure::Failed(
+                    "the connect attempt was cancelled".into(),
+                ));
+            }
+        }
+        // Fail rather than continue uncancellably: running out of descriptors
+        // is itself a reason to give this attempt up to the backoff.
+        Err(e) => {
+            return Err(ConnectFailure::Failed(format!(
+                "cannot duplicate the socket: {e}"
+            )))
+        }
+    }
 
     match tungstenite::client_tls(request, stream) {
         Ok((socket, _response)) => Ok(socket),
@@ -1083,6 +1222,107 @@ mod tests {
         // The point is that it returns at all; allow generous slack for a loaded
         // CI machine while still failing if the deadline was ignored.
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn establish_closes_the_connection_it_abandons() {
+        // Returning on time is not enough on its own: the worker left behind
+        // keeps a thread and a socket, and a peer that answers slowly but
+        // steadily can keep resetting the per-operation timeouts, so one such
+        // worker would accumulate per retry for as long as the peer wanted.
+        use std::io::Read as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (report, closed) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            // The upgrade request, which is answered with silence.
+            let _ = peer.read(&mut buf);
+            peer.set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            // Ends at EOF (or a reset) once the abandoned attempt is shut down;
+            // without that it blocks until the read timeout above.
+            let ended = match peer.read(&mut buf) {
+                Ok(0) => true,
+                Ok(_) => false,
+                Err(e) => !would_block(&e),
+            };
+            let _ = report.send(ended);
+        });
+
+        let request = Request::builder()
+            .uri(format!("ws://127.0.0.1:{port}/ws/"))
+            .header("Host", format!("127.0.0.1:{port}"))
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
+            .body(())
+            .unwrap();
+
+        assert!(establish(
+            "127.0.0.1".to_string(),
+            port,
+            request,
+            Duration::from_millis(500)
+        )
+        .is_err());
+        assert_eq!(closed.recv_timeout(Duration::from_secs(5)), Ok(true));
+    }
+
+    #[test]
+    fn a_socket_published_after_the_deadline_is_shut_down_by_its_worker() {
+        // The race the Cancellation states exist for: the deadline fires while
+        // the worker is between the TCP connect and publishing its duplicate.
+        // Whoever is second has to do the shutting down, or the socket is left
+        // with no one holding a handle to stop it.
+        use std::io::Read as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::thread::spawn(move || listener.accept().unwrap().0);
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut peer = accepted.join().unwrap();
+
+        let cancel: CancelSlot = Arc::new(Mutex::new(Cancellation::Pending));
+        cancel_attempt(&cancel);
+        assert!(
+            !publish_socket(&cancel, stream),
+            "publishing after the deadline must report the attempt cancelled"
+        );
+
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buf = [0u8; 16];
+        assert!(
+            matches!(peer.read(&mut buf), Ok(0)),
+            "the late socket must have been shut down rather than stored"
+        );
+    }
+
+    #[test]
+    fn connect_workers_are_capped_and_released() {
+        // Its own counter rather than CONNECT_WORKERS: filling the real one
+        // would starve any connect test running beside this one.
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        let first = ConnectWorker::acquire(&COUNTER, 2).expect("the first worker fits");
+        let second = ConnectWorker::acquire(&COUNTER, 2).expect("the second worker fits");
+        assert!(
+            ConnectWorker::acquire(&COUNTER, 2).is_none(),
+            "a third worker must be refused rather than started"
+        );
+
+        drop(second);
+        assert!(
+            ConnectWorker::acquire(&COUNTER, 2).is_some(),
+            "a worker that returned must give its slot back"
+        );
+        drop(first);
     }
 
     #[test]
