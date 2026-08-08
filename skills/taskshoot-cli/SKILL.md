@@ -162,6 +162,37 @@ taskshoot notifications read <id> [<id> ...]     # mark ids read (needs a write 
 taskshoot notifications read --all
 ```
 
+### Streaming that inbox (`listen`)
+
+`listen` holds a WebSocket open and prints each notification as one line of JSON, so a bot
+can react to a mention in seconds instead of at the next poll.
+
+```bash
+taskshoot listen --types task_mentioned          # mentions only, until killed
+taskshoot listen --types task_mentioned,task_assigned
+taskshoot listen --since <notification id>       # replay from a cursor
+taskshoot listen --max-events 1                  # exit after the first one
+taskshoot listen --state ./cursor.json           # move the state file
+taskshoot listen --no-state                      # do not persist the cursor at all
+```
+
+- **stdout** is only notifications (`{"type":"notification_created","notification":{…}}`);
+  connection logs go to stderr, so `taskshoot listen | while read -r event` needs no
+  filtering. `.notification.task.ref` is the `KEY-N` to pass back to the other commands,
+  and `.notification.task.bot_ready` is the human's permission gate.
+- **It does not replace polling.** The broadcast has no ACK and no replay, so events
+  created while the process is disconnected only return through the reconnect catchup,
+  which the server caps at 50. Keep the periodic sweep as the backstop.
+- It reconnects on its own (backoff 1s → 60s, jittered) but **exits non-zero when the
+  server refused** — a rejected key, or a `--types` / `--since` value it will not take —
+  since retrying cannot change that answer.
+- Delivery is **at least once**: the cursor is persisted after the event is printed. The
+  last 256 delivered ids are stored next to the cursor
+  (`~/.config/taskshoot/state/listen-<host>-<user id>-<types>.json`) so repeats are
+  dropped, but a consumer still has to be idempotent by `notification.id`. Each `--types`
+  filter gets its own file: a cursor from a narrower subscription would otherwise make a
+  wider one skip the events the narrow run was never sent.
+
 ## Key concepts
 
 - **Task references are `KEY-number`** (e.g. `DEV-12`). Untracked tasks have no number, so

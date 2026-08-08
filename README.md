@@ -237,6 +237,29 @@ taskshoot notifications read <id> [<id> ...]   # mark ids read (needs a write ke
 taskshoot notifications read --all             # mark all read
 ```
 
+Streaming the same inbox over a WebSocket, for a bot that should react in
+seconds rather than at the next poll:
+
+```bash
+taskshoot listen                                     # every type, until killed
+taskshoot listen --types task_mentioned              # mentions only
+taskshoot listen --types task_mentioned,task_assigned
+taskshoot listen --since <notification id>           # replay from a cursor
+taskshoot listen --max-events 1                      # exit after the first one
+taskshoot listen --no-state                          # do not persist the cursor
+```
+
+Each notification is written to **stdout** as one compact JSON object
+(`{"type":"notification_created","notification":{…}}`); connection logs go to
+stderr, so the stream can be piped straight into a consumer:
+
+```bash
+taskshoot listen --types task_mentioned | while read -r event; do
+  ref=$(printf '%s' "$event" | jq -r '.notification.task.ref // empty')
+  [ -n "$ref" ] && ./handle-mention.sh "$ref"
+done
+```
+
 ## Command notes
 
 - Task references are `KEY-number` (e.g. `DEV-12`). Untracked tasks have no number, so
@@ -366,8 +389,29 @@ taskshoot notifications read --all             # mark all read
   and they can only be referenced by display name or id. Mention *groups* are not listed
   (they are not users). The organization member list, which also carries email and role,
   is admin-only and is intentionally not used here.
-- `me` / `orgs` / `notifications` work with no organization set
+- `me` / `orgs` / `notifications` / `listen` work with no organization set
   (`TASKSHOOT_CLI_ORGANIZATION` unset); notifications are user-scoped and cross-org.
+- `listen` is **not a replacement for polling.** The server broadcasts on a channel layer
+  that has no ACK and no replay, so anything created while this process is disconnected
+  only comes back through the reconnect catchup, which the server caps at 50 events. Keep
+  the periodic `tasks --bot-ready true …` sweep as the backstop and treat the stream as
+  what shortens the delay:
+  - It reconnects on its own with exponential backoff (1s → 60s, jittered); a connection
+    that stayed up for a minute resets the backoff.
+  - It exits non-zero instead of retrying when the server *decided* — a rejected key, or a
+    `--types` / `--since` value it will not accept — because reconnecting cannot change
+    that answer.
+  - The cursor and the last 256 delivered ids are stored in
+    `~/.config/taskshoot/state/listen-<host>-<user id>-<types>.json` (`--state` to move it,
+    `--no-state` to turn it off). The ids are what keeps the catchup's deliberate overlap
+    from emitting the same event twice, across restarts too. The `--types` filter is part
+    of the name because a cursor only summarises what *that* subscription was sent:
+    sharing one across filters would let a narrow run advance past events a later, wider
+    run then never replays. The order the types are given in does not matter.
+  - Delivery is still **at least once**: an event is printed before the cursor is
+    persisted, so a consumer has to be idempotent by `notification.id`.
+  - A JSON keepalive ping goes out every 30s; no reply within 30s drops the connection and
+    reconnects.
 - `search` searches across all projects in the organization (`/task-search/` API). The
   server side is a hybrid of bigram (substring) + vector (semantic) search over title,
   description and comment bodies; a `KEY-number` or bare number matches directly.

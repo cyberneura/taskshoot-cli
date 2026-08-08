@@ -1,8 +1,10 @@
 mod api;
 mod commands;
 mod config;
+mod listen;
 mod models;
 mod output;
+mod proxy;
 mod stages;
 mod taskref;
 
@@ -148,6 +150,33 @@ enum Cmd {
     /// List / mark-read your notifications (bot mention inbox; user-scoped)
     #[command(subcommand)]
     Notifications(NotificationsCmd),
+    /// Stream notifications as JSON Lines over a WebSocket (bot mention inbox,
+    /// without the polling delay). Reconnects on its own and replays what was
+    /// missed while disconnected, but the catchup is capped server-side: keep
+    /// polling as a backstop. Notifications go to stdout, connection logs to
+    /// stderr
+    Listen {
+        /// Notification types to receive (repeatable and comma-separated;
+        /// e.g. task_mentioned,task_assigned). Default: every type. An unknown
+        /// type is rejected by the server rather than silently ignored
+        #[arg(long, value_delimiter = ',')]
+        types: Vec<String>,
+        /// Replay from this notification id instead of the stored cursor
+        #[arg(long)]
+        since: Option<String>,
+        /// State file holding the cursor and recently delivered ids
+        /// (default: ~/.config/taskshoot/state/listen-<host>-<user id>.json)
+        #[arg(long, conflicts_with = "no_state")]
+        state: Option<PathBuf>,
+        /// Do not read or write the state file. Nothing is replayed on the
+        /// next start unless --since is passed
+        #[arg(long)]
+        no_state: bool,
+        /// Exit after this many notifications (at least 1; default: run until
+        /// killed)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        max_events: Option<u64>,
+    },
     /// Inspect or create the config file (~/.config/taskshoot/config.yml)
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -400,7 +429,10 @@ fn run() -> Result<()> {
         };
     }
     // me / orgs / notifications need no org (notifications are user-scoped)
-    let need_org = !matches!(cli.command, Cmd::Me | Cmd::Orgs | Cmd::Notifications(_));
+    let need_org = !matches!(
+        cli.command,
+        Cmd::Me | Cmd::Orgs | Cmd::Notifications(_) | Cmd::Listen { .. }
+    );
     let config = config::resolve(cli.org.clone(), need_org)?;
     let api = api::Api::new(&config)?;
     let json = cli.json;
@@ -598,6 +630,23 @@ fn run() -> Result<()> {
                 commands::resume(&api, &task, project.as_deref(), json)
             }
         },
+        Cmd::Listen {
+            types,
+            since,
+            state,
+            no_state,
+            max_events,
+        } => listen::listen(
+            &api,
+            &config,
+            &listen::ListenArgs {
+                types,
+                since,
+                state,
+                no_state,
+                max_events,
+            },
+        ),
         Cmd::Notifications(notifications_cmd) => match notifications_cmd {
             NotificationsCmd::List { limit, unread_only } => {
                 commands::notifications_list(&api, limit, unread_only, json)
@@ -812,6 +861,27 @@ mod tests {
             "--count",
             "--json"
         ]));
+    }
+
+    #[test]
+    fn listen_rejects_a_limit_that_can_never_be_reached() {
+        // 0 would not mean "stop immediately": the limit is only checked after a
+        // message arrives, so it would stop on whatever came first
+        assert!(Cli::try_parse_from(["taskshoot", "listen", "--max-events", "0"]).is_err());
+        assert!(Cli::try_parse_from(["taskshoot", "listen", "--max-events", "1"]).is_ok());
+    }
+
+    #[test]
+    fn listen_state_and_no_state_are_mutually_exclusive() {
+        // --state names a file to keep; --no-state says to keep none
+        assert!(Cli::try_parse_from([
+            "taskshoot",
+            "listen",
+            "--state",
+            "cursor.json",
+            "--no-state",
+        ])
+        .is_err());
     }
 
     #[test]
