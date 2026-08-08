@@ -23,14 +23,16 @@
 
 use std::fs;
 use std::io::Write;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tungstenite::handshake::HandshakeError;
 use tungstenite::http::Request;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Error as WsError, Message, WebSocket};
@@ -52,6 +54,17 @@ const PONG_TIMEOUT: Duration = Duration::from_secs(30);
 // Socket read timeout. It only sets how often the loop wakes up to send a ping
 // or notice a dead peer; it is not an idle timeout for the connection itself.
 const READ_POLL: Duration = Duration::from_secs(5);
+// Bounds on getting a connection up. Without them a proxy that completes the
+// TCP handshake and then goes quiet leaves the blocking upgrade parked on a
+// stream with no timeout, and the reconnect loop below never gets to run.
+//
+// CONNECT_DEADLINE is the one that actually bounds the attempt: it covers name
+// resolution, every address tried, and the upgrade together. The other two are
+// per-operation, so on their own they would bound neither a multi-address
+// connect nor a peer answering slowly but steadily.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_IO_TIMEOUT: Duration = Duration::from_secs(20);
+const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
@@ -211,12 +224,18 @@ fn query_enc(value: &str) -> String {
     utf8_percent_encode(value, QUERY).to_string()
 }
 
-/// `~/.config/taskshoot/state/listen-<host>-<user id>.json`
+/// `~/.config/taskshoot/state/listen-<host>-<user id>-<types>.json`
 ///
-/// Keyed by both host and user because the cursor is meaningless across either:
+/// Keyed by host and user because the cursor is meaningless across either:
 /// pointing a local development server at a production cursor would ask it for
 /// ids it has never seen.
-fn default_state_path(api_origin: &str, user_id: &str) -> Result<PathBuf> {
+///
+/// Keyed by the subscription as well because the cursor only summarises what
+/// *this* filter has seen. A run with `--types task_mentioned` advances the
+/// cursor past the assignments it was never sent; a later run subscribing to
+/// more types would hand that cursor back and the catchup would skip them
+/// silently. Separate files keep each subscription's replay window intact.
+fn default_state_path(api_origin: &str, user_id: &str, types: &[String]) -> Result<PathBuf> {
     let home = dirs::home_dir().context("cannot determine the home directory")?;
     let host = api_origin
         .split("://")
@@ -228,10 +247,54 @@ fn default_state_path(api_origin: &str, user_id: &str) -> Result<PathBuf> {
         .join("taskshoot")
         .join("state")
         .join(format!(
-            "listen-{}-{}.json",
+            "listen-{}-{}-{}.json",
             sanitize_path_segment(host),
-            sanitize_path_segment(user_id)
+            sanitize_path_segment(user_id),
+            types_key(types)
         )))
+}
+
+/// How much of the readable type list survives in the file name before the
+/// digest has to carry the rest of it.
+const TYPES_KEY_READABLE_MAX: usize = 32;
+
+/// A file name component identifying one subscription.
+///
+/// Order and repetition do not change what the server sends, so they must not
+/// change the key either -- `--types a,b` and `--types b,a,b` share a cursor on
+/// purpose. The readable part is what makes the file recognisable; the digest is
+/// what keeps two subscriptions apart once sanitizing or truncating has made
+/// their readable parts equal, which is the only way they could otherwise end
+/// up sharing a cursor.
+fn types_key(types: &[String]) -> String {
+    if types.is_empty() {
+        return "all".to_string();
+    }
+    let mut normalized: Vec<&str> = types.iter().map(String::as_str).collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    let joined = normalized.join("+");
+    // `sanitize_path_segment` maps every non-ASCII character to a single byte,
+    // so the result is pure ASCII and this truncation cannot split a character.
+    let mut readable = sanitize_path_segment(&joined);
+    readable.truncate(TYPES_KEY_READABLE_MAX);
+    format!("{readable}-{:016x}", fnv1a64(&joined))
+}
+
+/// FNV-1a over the exact normalized type list.
+///
+/// The digest has to be stable across runs and distinct for distinct lists; it
+/// guards nothing against a chosen input, since the only thing it separates is
+/// one local user's own subscriptions. 64 bits leaves an accidental collision
+/// far below the odds of anything else in this file going wrong, and keeps the
+/// cost at no dependency and no allocation.
+fn fnv1a64(value: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// Keep a value usable as one file name component (host names carry `:` for a
@@ -273,7 +336,7 @@ pub fn listen(api: &Api, config: &Config, args: &ListenArgs) -> Result<()> {
     } else {
         Some(match args.state.clone() {
             Some(path) => path,
-            None => default_state_path(&config.api_origin, &user_id)?,
+            None => default_state_path(&config.api_origin, &user_id, &args.types)?,
         })
     };
 
@@ -364,15 +427,20 @@ fn run_connection(
         .body(())
         .context("cannot build the WebSocket handshake request")?;
 
-    let mut socket = match tungstenite::connect(request) {
-        Ok((socket, _response)) => socket,
-        Err(WsError::Http(response)) => return handshake_rejected(response.status().as_u16()),
-        Err(e) => return Ok(Disposition::Retry(format!("cannot connect: {e}"))),
+    // A malformed authority is not worth retrying: it comes from the configured
+    // origin, so the next attempt would build the same URL.
+    let (host, port) = connect_target(&url)?;
+    let mut socket = match establish(host, port, request, CONNECT_DEADLINE) {
+        Ok(socket) => socket,
+        Err(ConnectFailure::Rejected(status)) => return handshake_rejected(status),
+        Err(ConnectFailure::Failed(reason)) => return Ok(Disposition::Retry(reason)),
     };
 
+    // Relax the read timeout from the handshake bound to the polling interval:
+    // from here on it only sets how often the loop wakes up. It still must be
+    // set -- without it read() would block forever and never send a ping, so a
+    // silently dead peer would hang the process.
     if let Err(e) = set_read_timeout(&mut socket, READ_POLL) {
-        // Without the timeout the loop would block in read() forever and never
-        // send a ping, so a silently dead peer would hang the process.
         let _ = socket.close(None);
         return Ok(Disposition::Retry(format!(
             "cannot set the socket read timeout: {e}"
@@ -552,20 +620,180 @@ fn handle_message(
     Ok(Handled::Other)
 }
 
+/// Scheme and authority of a WebSocket URL, e.g. `("wss", "example.com:8443")`.
+///
+/// The authority is returned as written: that is exactly what the Host header
+/// needs, and it keeps an IPv6 literal's brackets for [`connect_target`] to
+/// strip.
+fn split_url(url: &str) -> Result<(&str, &str)> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .with_context(|| format!("malformed WebSocket URL {url}"))?;
+    let authority = rest.split(['/', '?']).next().unwrap_or(rest);
+    if authority.is_empty() {
+        bail!("malformed WebSocket URL {url}");
+    }
+    Ok((scheme, authority))
+}
+
 /// Host (with port) for the handshake's Host header.
 fn host_header(url: &str) -> Result<String> {
-    let after_scheme = url
-        .split("://")
-        .nth(1)
-        .with_context(|| format!("malformed WebSocket URL {url}"))?;
-    let host = after_scheme
-        .split(['/', '?'])
-        .next()
-        .unwrap_or(after_scheme);
+    Ok(split_url(url)?.1.to_string())
+}
+
+/// Why a connection attempt produced no socket.
+enum ConnectFailure {
+    /// The server answered the handshake with a non-101 status, so it decided
+    /// rather than failed.
+    Rejected(u16),
+    /// Anything else -- resolution, the TCP connect, TLS, or the deadline.
+    Failed(String),
+}
+
+/// Resolve, connect and upgrade, under one deadline for the whole phase.
+///
+/// The connection is built by hand rather than through `tungstenite::connect`
+/// for two reasons. The timeouts have to be on the stream *before* the upgrade
+/// is written to it, and tungstenite's redirect following is not wanted on a
+/// request carrying a bearer token: this path does not redirect, and following
+/// one would hand the key to whatever host the `Location` named.
+///
+/// It runs on its own thread only so that the deadline can cover the phase as a
+/// whole. None of the three steps is cancellable -- a resolver lookup and a
+/// blocking upgrade both run to completion -- so a deadline miss abandons the
+/// thread instead of stopping it. That is bounded rather than a leak: the
+/// per-operation timeouts make an abandoned attempt fail on its own, and one
+/// that instead succeeds finds the receiver gone and drops the connection.
+fn establish(
+    host: String,
+    port: u16,
+    request: Request<()>,
+    deadline: Duration,
+) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, ConnectFailure> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("taskshoot-connect".into())
+        .spawn(move || {
+            let _ = sender.send(connect_and_upgrade(&host, port, request));
+        })
+        .map_err(|e| ConnectFailure::Failed(format!("cannot start the connect thread: {e}")))?;
+
+    match receiver.recv_timeout(deadline) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(ConnectFailure::Failed(format!(
+            "no connection within {deadline:?}"
+        ))),
+        // The sender was dropped without sending, which only a panic does; its
+        // message is already on stderr.
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(ConnectFailure::Failed(
+            "the connect attempt panicked".into(),
+        )),
+    }
+}
+
+/// The blocking half of [`establish`], run on its own thread.
+fn connect_and_upgrade(
+    host: &str,
+    port: u16,
+    request: Request<()>,
+) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, ConnectFailure> {
+    let stream = connect_with_timeout(host, port)
+        .map_err(|e| ConnectFailure::Failed(format!("cannot connect: {e:#}")))?;
+    // Per-operation bounds, not a bound on the phase (that is the deadline in
+    // `establish`). What they are needed for is the abandoned case: a socket
+    // with no timeout at all would keep its attempt -- and its file descriptor
+    // -- alive indefinitely after the deadline gave up on it.
+    set_stream_timeouts(&stream, HANDSHAKE_IO_TIMEOUT)
+        .map_err(|e| ConnectFailure::Failed(format!("cannot bound the handshake: {e:#}")))?;
+
+    match tungstenite::client_tls(request, stream) {
+        Ok((socket, _response)) => Ok(socket),
+        Err(HandshakeError::Failure(WsError::Http(response))) => {
+            Err(ConnectFailure::Rejected(response.status().as_u16()))
+        }
+        // Interrupted only happens on a non-blocking stream. This one blocks
+        // (with timeouts), so report it as a failed attempt rather than trust
+        // the invariant enough to panic on it.
+        Err(e) => Err(ConnectFailure::Failed(format!(
+            "the WebSocket handshake failed: {e}"
+        ))),
+    }
+}
+
+/// Host and port to open the TCP connection to, from the WebSocket URL.
+///
+/// A malformed URL is an error rather than a retry: reconnecting cannot make it
+/// parse.
+fn connect_target(url: &str) -> Result<(String, u16)> {
+    let (scheme, authority) = split_url(url)?;
+    let default_port = match scheme {
+        "wss" => 443,
+        "ws" => 80,
+        other => bail!("unsupported WebSocket scheme {other} in {url}"),
+    };
+    // An IPv6 literal is bracketed (`[::1]:8008`), so the ':' inside it is not
+    // the port separator.
+    let (host, port) = if let Some(after_bracket) = authority.strip_prefix('[') {
+        let (host, rest) = after_bracket
+            .split_once(']')
+            .with_context(|| format!("malformed WebSocket URL {url}"))?;
+        (host, rest.strip_prefix(':'))
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
     if host.is_empty() {
         bail!("malformed WebSocket URL {url}");
     }
-    Ok(host.to_string())
+    let port = match port {
+        Some(port) => port
+            .parse()
+            .with_context(|| format!("malformed port {port:?} in {url}"))?,
+        None => default_port,
+    };
+    Ok((host.to_string(), port))
+}
+
+/// Connect to the first address that answers, giving each its own bound.
+///
+/// Name resolution itself is left to the OS resolver, which applies its own
+/// timeout; the unbounded wait this is here to avoid is the connect, not the
+/// lookup.
+fn connect_with_timeout(host: &str, port: u16) -> Result<TcpStream> {
+    let addrs: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("cannot resolve {host}:{port}"))?
+        .collect();
+    let mut last: Option<std::io::Error> = None;
+    for addr in &addrs {
+        match TcpStream::connect_timeout(addr, CONNECT_TIMEOUT) {
+            Ok(stream) => {
+                // Nagle would only delay the small ping/pong frames; there is
+                // nothing here worth coalescing.
+                let _ = stream.set_nodelay(true);
+                return Ok(stream);
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    match last {
+        Some(e) => Err(e).with_context(|| format!("cannot reach {host}:{port}")),
+        None => bail!("{host}:{port} resolved to no addresses"),
+    }
+}
+
+/// Bound both directions on the raw stream, before it is wrapped for TLS and
+/// the upgrade is written to it.
+fn set_stream_timeouts(stream: &TcpStream, timeout: Duration) -> Result<()> {
+    stream
+        .set_read_timeout(Some(timeout))
+        .context("set_read_timeout failed")?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .context("set_write_timeout failed")?;
+    Ok(())
 }
 
 /// A socket read timeout surfaces as WouldBlock on unix and TimedOut on
@@ -758,18 +986,131 @@ mod tests {
 
     #[test]
     fn default_state_path_separates_hosts_and_users() {
-        let prod = default_state_path("https://taskshoot-api.cyberneura.com", "019f-user").unwrap();
-        let local = default_state_path("http://127.0.0.1:8008", "019f-user").unwrap();
+        let prod =
+            default_state_path("https://taskshoot-api.cyberneura.com", "019f-user", &[]).unwrap();
+        let local = default_state_path("http://127.0.0.1:8008", "019f-user", &[]).unwrap();
         assert_ne!(prod, local);
         assert_eq!(
             prod.file_name().unwrap(),
-            "listen-taskshoot-api.cyberneura.com-019f-user.json"
+            "listen-taskshoot-api.cyberneura.com-019f-user-all.json"
         );
         // The port's ':' would otherwise be a path separator on Windows
         assert_eq!(
             local.file_name().unwrap(),
-            "listen-127.0.0.1_8008-019f-user.json"
+            "listen-127.0.0.1_8008-019f-user-all.json"
         );
+    }
+
+    #[test]
+    fn default_state_path_separates_subscriptions() {
+        let path = |types: &[&str]| {
+            let types: Vec<String> = types.iter().map(|t| (*t).to_string()).collect();
+            default_state_path("https://example.com", "019f-user", &types).unwrap()
+        };
+        // A narrower filter advances its cursor past what it never received, so
+        // it must not hand that cursor to a wider one
+        let mentioned = path(&["task_mentioned"]);
+        let both = path(&["task_mentioned", "task_assigned"]);
+        assert_ne!(mentioned, both);
+        assert_ne!(both, path(&[]));
+        // ... but the same subscription written differently is the same one
+        assert_eq!(both, path(&["task_assigned", "task_mentioned"]));
+        assert_eq!(
+            both,
+            path(&["task_assigned", "task_mentioned", "task_assigned"])
+        );
+    }
+
+    #[test]
+    fn types_key_stays_a_usable_file_name_component() {
+        assert_eq!(types_key(&[]), "all");
+        assert!(types_key(&["task_mentioned".into()]).starts_with("task_mentioned-"));
+        // A type list has no bound from the command line; the file name does
+        let huge: Vec<String> = (0..50).map(|i| format!("type_number_{i}")).collect();
+        let key = types_key(&huge);
+        assert!(key.len() <= TYPES_KEY_READABLE_MAX + 17, "{key}");
+        // Truncation must not merge two subscriptions that share a prefix
+        let mut other = huge.clone();
+        other.push("type_number_extra".into());
+        assert_ne!(key, types_key(&other));
+        // Separators are gone, so the key stays one component. `.` survives (it
+        // is legal in a name), but the digest suffix keeps the result from ever
+        // being bare `.` or `..`.
+        let key = types_key(&["a/b".into(), "../c".into()]);
+        assert!(!key.contains(std::path::is_separator), "{key}");
+        assert_eq!(Path::new(&key).components().count(), 1, "{key}");
+    }
+
+    #[test]
+    fn establish_gives_up_on_a_peer_that_accepts_and_goes_quiet() {
+        // The failure this guards against: a proxy completes the TCP handshake
+        // and then never answers the upgrade. With the bound only on the socket
+        // after `connect` returned, this attempt never came back and the
+        // reconnect loop never ran.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // Accept and hold: read nothing, write nothing, close nothing.
+            let held: Vec<_> = listener.incoming().flatten().collect();
+            drop(held);
+        });
+
+        let request = Request::builder()
+            .uri(format!("ws://127.0.0.1:{port}/ws/"))
+            .header("Host", format!("127.0.0.1:{port}"))
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
+            .body(())
+            .unwrap();
+
+        let started = Instant::now();
+        let deadline = Duration::from_millis(500);
+        match establish("127.0.0.1".to_string(), port, request, deadline) {
+            Ok(_) => panic!("a peer that never answers must not produce a socket"),
+            Err(ConnectFailure::Failed(reason)) => assert!(
+                reason.contains("no connection"),
+                "expected a deadline miss, got {reason}"
+            ),
+            Err(ConnectFailure::Rejected(status)) => {
+                panic!("the peer answered nothing, yet it was read as a refusal ({status})")
+            }
+        }
+        // The point is that it returns at all; allow generous slack for a loaded
+        // CI machine while still failing if the deadline was ignored.
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn connect_target_reads_the_host_and_port() {
+        assert_eq!(
+            connect_target("wss://example.com/ws/user/notifications/").unwrap(),
+            ("example.com".to_string(), 443)
+        );
+        assert_eq!(
+            connect_target("ws://example.com/ws/").unwrap(),
+            ("example.com".to_string(), 80)
+        );
+        assert_eq!(
+            connect_target("ws://127.0.0.1:8008/ws/?types=a").unwrap(),
+            ("127.0.0.1".to_string(), 8008)
+        );
+        // The ':' inside an IPv6 literal is not the port separator
+        assert_eq!(
+            connect_target("ws://[::1]/ws/").unwrap(),
+            ("::1".to_string(), 80)
+        );
+        assert_eq!(
+            connect_target("wss://[::1]:8443/ws/").unwrap(),
+            ("::1".to_string(), 8443)
+        );
+        assert!(connect_target("example.com/ws/").is_err());
+        assert!(connect_target("https://example.com/ws/").is_err());
+        assert!(connect_target("ws://example.com:not-a-port/ws/").is_err());
     }
 
     #[test]

@@ -402,9 +402,12 @@ done
     `--types` / `--since` value it will not accept — because reconnecting cannot change
     that answer.
   - The cursor and the last 256 delivered ids are stored in
-    `~/.config/taskshoot/state/listen-<host>-<user id>.json` (`--state` to move it,
+    `~/.config/taskshoot/state/listen-<host>-<user id>-<types>.json` (`--state` to move it,
     `--no-state` to turn it off). The ids are what keeps the catchup's deliberate overlap
-    from emitting the same event twice, across restarts too.
+    from emitting the same event twice, across restarts too. The `--types` filter is part
+    of the name because a cursor only summarises what *that* subscription was sent:
+    sharing one across filters would let a narrow run advance past events a later, wider
+    run then never replays. The order the types are given in does not matter.
   - Delivery is still **at least once**: an event is printed before the cursor is
     persisted, so a consumer has to be idempotent by `notification.id`.
   - A JSON keepalive ping goes out every 30s; no reply within 30s drops the connection and

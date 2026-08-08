@@ -188,8 +188,10 @@ taskshoot listen --no-state                      # do not persist the cursor at 
   since retrying cannot change that answer.
 - Delivery is **at least once**: the cursor is persisted after the event is printed. The
   last 256 delivered ids are stored next to the cursor
-  (`~/.config/taskshoot/state/listen-<host>-<user id>.json`) so repeats are dropped, but a
-  consumer still has to be idempotent by `notification.id`.
+  (`~/.config/taskshoot/state/listen-<host>-<user id>-<types>.json`) so repeats are
+  dropped, but a consumer still has to be idempotent by `notification.id`. Each `--types`
+  filter gets its own file: a cursor from a narrower subscription would otherwise make a
+  wider one skip the events the narrow run was never sent.
 
 ## Key concepts
 
