@@ -40,6 +40,7 @@ use tungstenite::{Error as WsError, Message, WebSocket};
 
 use crate::api::Api;
 use crate::config::Config;
+use crate::proxy::{self, Proxy};
 
 const WS_PATH: &str = "/ws/user/notifications/";
 
@@ -440,7 +441,18 @@ fn run_connection(
     // A malformed authority is not worth retrying: it comes from the configured
     // origin, so the next attempt would build the same URL.
     let (host, port) = connect_target(&url)?;
-    let mut socket = match establish(host, port, request, CONNECT_DEADLINE) {
+    // Not retryable either: a proxy variable that does not parse is a mistake in
+    // the environment, and the next attempt would read the same value.
+    let proxy = proxy::select(url.starts_with("wss:"), &host, port, |name| {
+        std::env::var(name).ok()
+    })?;
+    if let Some(proxy) = &proxy {
+        eprintln!(
+            "taskshoot: connecting through the proxy in {} ({}:{})",
+            proxy.source, proxy.host, proxy.port
+        );
+    }
+    let mut socket = match establish(host, port, proxy, request, CONNECT_DEADLINE) {
         Ok(socket) => socket,
         Err(ConnectFailure::Rejected(status)) => return handshake_rejected(status),
         Err(ConnectFailure::Failed(reason)) => return Ok(Disposition::Retry(reason)),
@@ -684,6 +696,7 @@ enum ConnectFailure {
 fn establish(
     host: String,
     port: u16,
+    proxy: Option<Proxy>,
     request: Request<()>,
     deadline: Duration,
 ) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, ConnectFailure> {
@@ -703,7 +716,13 @@ fn establish(
             // Held for the whole attempt so the slot is only released once this
             // worker really is gone, abandoned or not.
             let _worker = worker;
-            let _ = sender.send(connect_and_upgrade(&host, port, request, &worker_cancel));
+            let _ = sender.send(connect_and_upgrade(
+                &host,
+                port,
+                proxy.as_ref(),
+                request,
+                &worker_cancel,
+            ));
         })
         .map_err(|e| ConnectFailure::Failed(format!("cannot start the connect thread: {e}")))?;
 
@@ -812,10 +831,15 @@ impl Drop for ConnectWorker {
 fn connect_and_upgrade(
     host: &str,
     port: u16,
+    proxy: Option<&Proxy>,
     request: Request<()>,
     cancel: &CancelSlot,
 ) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, ConnectFailure> {
-    let stream = connect_with_timeout(host, port)
+    // With a proxy the socket goes to the proxy, and the tunnel to the API is
+    // asked for over it. Everything after that -- timeouts, cancellation, the
+    // TLS handshake -- is the same either way.
+    let target = proxy.map_or((host, port), |proxy| (proxy.host.as_str(), proxy.port));
+    let mut stream = connect_with_timeout(target.0, target.1)
         .map_err(|e| ConnectFailure::Failed(format!("cannot connect: {e:#}")))?;
     // Per-operation bounds, not a bound on the phase (that is the deadline in
     // `establish`). What they are needed for is the abandoned case: a socket
@@ -842,6 +866,14 @@ fn connect_and_upgrade(
             return Err(ConnectFailure::Failed(format!(
                 "cannot duplicate the socket: {e}"
             )))
+        }
+    }
+
+    // After the socket is published, so a proxy that accepts the connection and
+    // then stalls on CONNECT is cancelled by the deadline like any other stall.
+    if let Some(proxy) = proxy {
+        if let Err(e) = proxy::tunnel(&mut stream, proxy, host, port) {
+            return Err(ConnectFailure::Failed(format!("{e:#}")));
         }
     }
 
@@ -1209,7 +1241,7 @@ mod tests {
 
         let started = Instant::now();
         let deadline = Duration::from_millis(500);
-        match establish("127.0.0.1".to_string(), port, request, deadline) {
+        match establish("127.0.0.1".to_string(), port, None, request, deadline) {
             Ok(_) => panic!("a peer that never answers must not produce a socket"),
             Err(ConnectFailure::Failed(reason)) => assert!(
                 reason.contains("no connection"),
@@ -1268,6 +1300,7 @@ mod tests {
         assert!(establish(
             "127.0.0.1".to_string(),
             port,
+            None,
             request,
             Duration::from_millis(500)
         )

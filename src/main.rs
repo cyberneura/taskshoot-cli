@@ -4,6 +4,7 @@ mod config;
 mod listen;
 mod models;
 mod output;
+mod proxy;
 mod stages;
 mod taskref;
 
