@@ -135,6 +135,29 @@ taskshoot task resume DEV-12
 taskshoot task track <uuid> --project DEV          # untracked -> tracked (assigns a number)
 ```
 
+### Showing that you are working ("typing…" indicator)
+
+Puts a transient line on the task thread so people watching it can see the bot is
+alive. It is **not** a message: nothing is stored, nothing is notified, and it
+disappears on its own.
+
+```bash
+taskshoot task activity DEV-12                    # who is shown as active right now
+taskshoot task activity DEV-12 --set              # default "typing…" state, gone in 10s
+taskshoot task activity DEV-12 --text "Searching the web…" --ttl 60
+taskshoot task activity DEV-12 --text "Searching the web…" --text-ja "Webで検索しています…"
+taskshoot task activity DEV-12 --clear            # take it down without waiting for the TTL
+```
+
+- The indicator **expires** (`--ttl`, default 10s, max 300s). For work that runs
+  longer than the TTL, call `--set` again periodically to keep it up — that is the
+  intended usage, and it is also what makes a crashed bot's indicator disappear.
+- **Posting a message clears your own indicator automatically**, so a bot that
+  ends with `task comment` / `task complete` does not need `--clear`.
+- `--text` / `--text-ja` fill in for each other, so one of them is enough. Omit
+  both to get the default typing indicator, whose wording each client renders in
+  its own language.
+
 ### Project categories (manager role or higher)
 
 ```bash

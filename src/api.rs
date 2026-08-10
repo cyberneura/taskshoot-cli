@@ -98,6 +98,14 @@ impl Api {
         self.send(self.request(reqwest::Method::PATCH, path).json(body))
     }
 
+    fn put(&self, path: &str, body: &Value) -> Result<Value> {
+        self.send(self.request(reqwest::Method::PUT, path).json(body))
+    }
+
+    fn delete(&self, path: &str) -> Result<Value> {
+        self.send(self.request(reqwest::Method::DELETE, path))
+    }
+
     fn org_path(&self, rest: &str) -> Result<String> {
         Ok(format!("/api/org/{}/{}", enc(self.org()?), rest))
     }
@@ -191,6 +199,22 @@ impl Api {
 
     pub fn events(&self, project: &str, task_ref: &str) -> Result<Value> {
         self.get(&self.task_path(project, task_ref, "/events/")?)
+    }
+
+    /// 「入力しています…」等の一時的な表示を出す / 延命する (冪等)。
+    /// body は両方省略可: text を省くと既定の入力中表示、ttl は既定 10 秒。
+    pub fn set_activity(&self, project: &str, task_ref: &str, body: &Value) -> Result<Value> {
+        self.put(&self.task_path(project, task_ref, "/activity/")?, body)
+    }
+
+    /// 自分の一時的な表示を消す。TTL 切れを待たずに消したい時に使う。
+    pub fn clear_activity(&self, project: &str, task_ref: &str) -> Result<Value> {
+        self.delete(&self.task_path(project, task_ref, "/activity/")?)
+    }
+
+    /// そのタスクで現在有効な一時的な表示の一覧。
+    pub fn activities(&self, project: &str, task_ref: &str) -> Result<Value> {
+        self.get(&self.task_path(project, task_ref, "/activity/")?)
     }
 
     pub fn post_comment(&self, project: &str, task_ref: &str, content: &str) -> Result<Value> {

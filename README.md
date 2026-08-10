@@ -225,6 +225,10 @@ taskshoot task events DEV-12                     # show the thread
 taskshoot task track <uuid> --project DEV        # untracked -> tracked (assigns a number)
 taskshoot task cancel DEV-12 --reason "duplicate"
 taskshoot task resume DEV-12
+taskshoot task activity DEV-12                   # who is shown as typing / working right now
+taskshoot task activity DEV-12 --set             # show yourself as typing (expires in 10s)
+taskshoot task activity DEV-12 --text "Searching the web…" --ttl 60
+taskshoot task activity DEV-12 --clear           # take your own indicator down now
 ```
 
 Notifications (mention inbox):
@@ -348,6 +352,15 @@ done
   (Japanese) or the english value
   (`done` / `invalid` / `rejected` / `cancelled` / `in_progress` / `acceptance` /
   `pre_approval`). The JSON `phase` field is returned as the english value.
+- `task activity` shows or sets a **transient** "typing / working" indicator on the task
+  thread. It is not a message: nothing is stored in the database, no notification is sent,
+  and the task's `latest_event_at` / unread state are untouched. The indicator **expires**
+  (`--ttl`, default 10s, max 300s), so a long-running bot should call `--set` again
+  periodically to keep it up — which also means a crashed bot's indicator disappears by
+  itself. Posting a message clears your own indicator automatically, so a bot that ends
+  with `task comment` / `task complete` does not need `--clear`. Omitting `--text` /
+  `--text-ja` means "the default typing indicator", whose wording each client renders in
+  its own language; passing only one of them uses it for both languages.
 - `task complete` moves to the workflow's terminal stage. If the project's workflow has an
   acceptance flow, the task enters the acceptance phase rather than being completed (by
   design). `--comment` is posted to the thread after completion succeeds.
