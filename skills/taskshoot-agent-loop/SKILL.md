@@ -88,9 +88,12 @@ taskshoot tasks --project DEV \
   not statuses. In particular an "invalid" task keeps its original stage (e.g. "draft"),
   so it would otherwise slip into a `--status draft` candidate list and `--exclude-status`
   could not remove it.
-- `--assignee me` already excludes tasks taken by someone else; the atomic claim in
-  step 3 (`claim --if-unassigned` accepts tasks already assigned to you) remains the real
-  double-processing guard between concurrent runs of the same agent.
+- `--assignee me` already excludes tasks taken by someone else. Note the atomic claim in
+  step 3 does NOT discriminate between two concurrent runs of the *same* bot identity:
+  `claim --if-unassigned` accepts tasks already assigned to you, and with `--assignee me`
+  every candidate is. **Run at most one loop instance per bot identity** — the cron
+  wrappers enforce this with a host-local lock (flock / shlock), and a bot key must not be
+  shared across hosts. Between *different* bots the claim CAS still arbitrates.
 
 If no candidates remain, stop (see "Termination").
 

@@ -357,10 +357,11 @@ done
   the web UI's mention rendering (handle_name, or a default handle derived from the email
   local part), and includes mentions of MentionGroups the user belongs to (`@dev-team`, …).
 - `tasks --mentioned-or-assignee <user>` is the **union** of `--assignee` and `--mentioned`:
-  "assigned to that user **or** @-mentioning them". It is what a bot loop wants (`--bot-ready
-  true --mentioned-or-assignee me`), because a task meant for a bot is sometimes handed over
-  by assigning it and sometimes by mentioning it. The API filters with AND only, so the
-  union is done client-side:
+  "assigned to that user **or** @-mentioning them". Note that a bot **work loop** should
+  filter by `--assignee me` alone: mentions are conversations, answered in real time by
+  [taskshoot-socket-agent](https://github.com/cyberneura/taskshoot-socket-agent), and a
+  loop that also picks up mentions double-responds (see the `taskshoot-agent-loop` skill).
+  The API filters with AND only, so the union is done client-side:
   - Two requests are sent **per project** (one filtered by assignee, one by mention) and
     merged, so `--limit` applies to each half; a project can return up to `2 x limit` tasks.
     A task matching both halves is returned once (folded by task id).
@@ -419,9 +420,10 @@ done
 ### Example AI-agent flow
 
 ```bash
-# find pickable, unstarted tasks that are meant for this bot (assigned to it or mentioning it)
+# find pickable, unstarted tasks handed to this bot (assigned to it; mentions are
+# handled separately by taskshoot-socket-agent)
 taskshoot tasks --project DEV --bot-ready true --status draft \
-  --exclude-phase done,invalid,rejected,cancelled --mentioned-or-assignee me --json
+  --exclude-phase done,invalid,rejected,cancelled --assignee me --json
 taskshoot task claim DEV-12 --if-unassigned --json     # claim it (avoids double-processing: 409 if taken)
 taskshoot task comment DEV-12 "Starting now" --json
 # ... development ...
