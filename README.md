@@ -204,6 +204,7 @@ taskshoot tasks --project DEV --mentioned me   # tasks that @-mention you
 taskshoot tasks --project DEV --mentioned suzuki   # a specific person (handle / display name / id)
 taskshoot tasks --project DEV --mentioned-or-assignee me   # assigned to you OR @-mentioning you
 taskshoot tasks --project DEV --untracked      # casual tasks only
+taskshoot tasks --project DEV --tracked        # numbered tasks only
 taskshoot tasks --project DEV --bot-ready true # only tasks a bot may pick up
 taskshoot tasks --project DEV --bot-ready true --count         # just how many matched (prints "3")
 taskshoot tasks --bot-ready true --count --json                # {"count": 3}
