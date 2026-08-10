@@ -1703,6 +1703,119 @@ pub fn resume(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
     print_task_line(&value, "resumed")
 }
 
+/// Arguments for [`activity`]. Grouped into a struct because the handler takes
+/// more than the ~5 positional parameters the other commands use.
+pub struct ActivityArgs<'a> {
+    pub task: &'a str,
+    pub project: Option<&'a str>,
+    pub set: bool,
+    pub clear: bool,
+    pub text: Option<&'a str>,
+    pub text_ja: Option<&'a str>,
+    pub ttl: Option<u32>,
+}
+
+/// Build the PUT body for the activity endpoint.
+///
+/// Both fields are optional server-side: omitting `text` means "the default
+/// typing indicator" (the wording is chosen by each client in its own
+/// language), and omitting `ttl_seconds` uses the server default.
+/// `--text` / `--text-ja` fill in for each other so a single flag is enough.
+fn activity_body(args: &ActivityArgs<'_>) -> Value {
+    let mut body = serde_json::Map::new();
+    if args.text.is_some() || args.text_ja.is_some() {
+        let en = args.text.or(args.text_ja);
+        let ja = args.text_ja.or(args.text);
+        let mut text = serde_json::Map::new();
+        if let Some(en) = en {
+            text.insert("en".into(), Value::String(en.to_string()));
+        }
+        if let Some(ja) = ja {
+            text.insert("ja".into(), Value::String(ja.to_string()));
+        }
+        body.insert("text".into(), Value::Object(text));
+    }
+    if let Some(ttl) = args.ttl {
+        body.insert("ttl_seconds".into(), Value::Number(ttl.into()));
+    }
+    Value::Object(body)
+}
+
+pub fn activity(api: &Api, args: ActivityArgs<'_>, json: bool) -> Result<()> {
+    let (project, task_ref) = resolve_target(args.task, args.project)?;
+
+    if args.clear {
+        api.clear_activity(&project, &task_ref)?;
+        if json {
+            return print_json(&json!({ "cleared": true }));
+        }
+        println!("activity cleared");
+        return Ok(());
+    }
+
+    // Any of the content options implies --set, so `--text "..."` alone works.
+    if args.set || args.text.is_some() || args.text_ja.is_some() || args.ttl.is_some() {
+        let value = api.set_activity(&project, &task_ref, &activity_body(&args))?;
+        if json {
+            return print_json(&value);
+        }
+        println!("activity set (expires at {})", activity_expiry(&value)?);
+        return Ok(());
+    }
+
+    let value = api.activities(&project, &task_ref)?;
+    if json {
+        return print_json(&value);
+    }
+    print_activities(&value)
+}
+
+/// `expires_at` is required in the response schema, so a missing one means the
+/// API changed shape. Surface that instead of printing a plausible-looking
+/// success line.
+fn activity_expiry(value: &Value) -> Result<&str> {
+    value
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .context("unexpected API response: activity has no expires_at")
+}
+
+/// Human-readable listing. Text is shown as-is; an entry without text is the
+/// default typing indicator, so we spell that out rather than printing nothing.
+fn print_activities(value: &Value) -> Result<()> {
+    // Treating a malformed response as "empty" would report an API change as a
+    // normal, quiet result.
+    let activities = value
+        .get("activities")
+        .and_then(Value::as_array)
+        .context("unexpected API response: no activities array")?;
+    if activities.is_empty() {
+        println!("no activity");
+        return Ok(());
+    }
+    for activity in activities {
+        let who = activity
+            .get("user")
+            .and_then(|user| {
+                user.get("handle_name")
+                    .and_then(Value::as_str)
+                    .filter(|handle| !handle.is_empty())
+                    .or_else(|| user.get("display_name").and_then(Value::as_str))
+            })
+            .unwrap_or("(unknown)");
+        let text = activity
+            .get("text")
+            .and_then(|text| {
+                text.get("en")
+                    .and_then(Value::as_str)
+                    .or_else(|| text.get("ja").and_then(Value::as_str))
+            })
+            .unwrap_or("typing…");
+        println!("{who}: {text} (until {})", activity_expiry(activity)?);
+    }
+    Ok(())
+}
+
 pub fn notifications_list(api: &Api, limit: u32, unread_only: bool, json: bool) -> Result<()> {
     let value = api.notifications(limit.clamp(1, 100), unread_only)?;
     if json {
@@ -1756,6 +1869,70 @@ pub fn notifications_read(api: &Api, ids: &[String], all: bool, json: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_body_is_empty_without_options() {
+        // Both fields are optional server-side: an empty body means "default
+        // typing indicator, default TTL".
+        let args = ActivityArgs {
+            task: "DEV-1",
+            project: None,
+            set: true,
+            clear: false,
+            text: None,
+            text_ja: None,
+            ttl: None,
+        };
+        assert_eq!(activity_body(&args), json!({}));
+    }
+
+    #[test]
+    fn activity_body_fills_missing_language_from_the_other() {
+        let args = ActivityArgs {
+            task: "DEV-1",
+            project: None,
+            set: false,
+            clear: false,
+            text: Some("searching"),
+            text_ja: None,
+            ttl: Some(30),
+        };
+        assert_eq!(
+            activity_body(&args),
+            json!({"text": {"en": "searching", "ja": "searching"}, "ttl_seconds": 30})
+        );
+
+        let args = ActivityArgs {
+            task: "DEV-1",
+            project: None,
+            set: false,
+            clear: false,
+            text: None,
+            text_ja: Some("検索中"),
+            ttl: None,
+        };
+        assert_eq!(
+            activity_body(&args),
+            json!({"text": {"en": "検索中", "ja": "検索中"}})
+        );
+    }
+
+    #[test]
+    fn activity_body_keeps_both_languages() {
+        let args = ActivityArgs {
+            task: "DEV-1",
+            project: None,
+            set: false,
+            clear: false,
+            text: Some("searching"),
+            text_ja: Some("検索中"),
+            ttl: None,
+        };
+        assert_eq!(
+            activity_body(&args),
+            json!({"text": {"en": "searching", "ja": "検索中"}})
+        );
+    }
 
     const SUZUKI_ID: &str = "019f31d1-0000-0000-0000-000000000001";
     const BOT_ID: &str = "019f31d1-0000-0000-0000-000000000002";

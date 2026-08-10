@@ -100,8 +100,9 @@ enum Cmd {
         #[arg(long)]
         mentioned: Option<String>,
         /// Filter to tasks assigned to the user OR mentioning them (the union
-        /// of --assignee and --mentioned; bot loops use
-        /// --mentioned-or-assignee me). Sent as two requests per project and
+        /// of --assignee and --mentioned). Bot work loops should use
+        /// --assignee me instead: mentions are answered in real time by
+        /// taskshoot-socket-agent. Sent as two requests per project and
         /// merged, so --limit applies to each half
         #[arg(long, conflicts_with_all = ["assignee", "mentioned"])]
         mentioned_or_assignee: Option<String>,
@@ -222,6 +223,13 @@ enum NotificationsCmd {
 /// The parser has to be built from `value_parser!(u32)` so that it yields the same
 /// type as the field it fills: clap does not convert between a parser's output type
 /// and the declared field type, it downcasts, and a mismatch panics at parse time.
+/// The activity TTL the server accepts (`MIN_TTL_SECONDS`..=`MAX_TTL_SECONDS`).
+/// The server clamps out-of-range values rather than rejecting them, so without
+/// this the documented "1-300" would silently not hold (`--ttl 0` would become 1).
+fn activity_ttl_value_parser() -> RangedI64ValueParser<u32> {
+    clap::value_parser!(u32).range(1..=300)
+}
+
 fn ordering_value_parser() -> RangedI64ValueParser<u32> {
     clap::value_parser!(u32).range(0..=2_147_483_647)
 }
@@ -440,6 +448,32 @@ enum TaskCmd {
         task: String,
         #[arg(long)]
         project: Option<String>,
+    },
+    /// Show or set the transient "typing / working" indicator on a task thread
+    ///
+    /// With no options it prints who is currently shown as active.
+    /// --set puts your own indicator up (repeat it to keep it alive; it expires
+    /// after --ttl seconds). --clear takes it down early. Posting a message
+    /// clears it automatically, so bots usually only need --set and --clear.
+    Activity {
+        task: String,
+        #[arg(long)]
+        project: Option<String>,
+        /// Put up an indicator. Without --text it shows the default "typing" state
+        #[arg(long, conflicts_with = "clear")]
+        set: bool,
+        /// Take your own indicator down now (instead of waiting for the TTL)
+        #[arg(long)]
+        clear: bool,
+        /// Text to show, e.g. "Searching the web…". Implies --set
+        #[arg(long, conflicts_with = "clear")]
+        text: Option<String>,
+        /// Japanese text. Falls back to --text when omitted. Implies --set
+        #[arg(long = "text-ja", conflicts_with = "clear")]
+        text_ja: Option<String>,
+        /// Seconds to keep the indicator up (1-300, default 10). Implies --set
+        #[arg(long, conflicts_with = "clear", value_parser = activity_ttl_value_parser())]
+        ttl: Option<u32>,
     },
 }
 
@@ -680,6 +714,27 @@ fn run() -> Result<()> {
             TaskCmd::Resume { task, project } => {
                 commands::resume(&api, &task, project.as_deref(), json)
             }
+            TaskCmd::Activity {
+                task,
+                project,
+                set,
+                clear,
+                text,
+                text_ja,
+                ttl,
+            } => commands::activity(
+                &api,
+                commands::ActivityArgs {
+                    task: &task,
+                    project: project.as_deref(),
+                    set,
+                    clear,
+                    text: text.as_deref(),
+                    text_ja: text_ja.as_deref(),
+                    ttl,
+                },
+                json,
+            ),
         },
         Cmd::Listen {
             types,
@@ -713,6 +768,107 @@ fn run() -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    fn activity_of(args: &[&str]) -> TaskCmd {
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Task(task_cmd) => *task_cmd,
+            _ => panic!("expected a task command"),
+        }
+    }
+
+    #[test]
+    fn task_activity_parses_set_options() {
+        let cmd = activity_of(&[
+            "taskshoot",
+            "task",
+            "activity",
+            "DEV-1",
+            "--text",
+            "Searching the web…",
+            "--text-ja",
+            "Webで検索しています…",
+            "--ttl",
+            "30",
+        ]);
+        match cmd {
+            TaskCmd::Activity {
+                task,
+                set,
+                clear,
+                text,
+                text_ja,
+                ttl,
+                ..
+            } => {
+                assert_eq!(task, "DEV-1");
+                // --text alone implies --set, so the flag itself stays false here.
+                assert!(!set);
+                assert!(!clear);
+                assert_eq!(text.as_deref(), Some("Searching the web…"));
+                assert_eq!(text_ja.as_deref(), Some("Webで検索しています…"));
+                assert_eq!(ttl, Some(30));
+            }
+            _ => panic!("expected task activity"),
+        }
+    }
+
+    #[test]
+    fn task_activity_defaults_to_reading() {
+        match activity_of(&["taskshoot", "task", "activity", "DEV-1"]) {
+            TaskCmd::Activity {
+                set,
+                clear,
+                text,
+                ttl,
+                ..
+            } => {
+                assert!(!set);
+                assert!(!clear);
+                assert!(text.is_none());
+                assert!(ttl.is_none());
+            }
+            _ => panic!("expected task activity"),
+        }
+    }
+
+    #[test]
+    fn task_activity_rejects_out_of_range_ttl() {
+        // The server clamps instead of rejecting, so the CLI has to hold the
+        // documented range itself.
+        for value in ["0", "301"] {
+            assert!(
+                Cli::try_parse_from(["taskshoot", "task", "activity", "DEV-1", "--ttl", value])
+                    .is_err(),
+                "expected --ttl {value} to be rejected"
+            );
+        }
+        for value in ["1", "300"] {
+            assert!(
+                Cli::try_parse_from(["taskshoot", "task", "activity", "DEV-1", "--ttl", value])
+                    .is_ok(),
+                "expected --ttl {value} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn task_activity_rejects_clear_with_set_options() {
+        // Clearing and setting in one call has no sensible meaning; clap must
+        // reject it rather than letting one silently win.
+        for extra in [
+            vec!["--set"],
+            vec!["--text", "x"],
+            vec!["--text-ja", "x"],
+            vec!["--ttl", "5"],
+        ] {
+            let mut args = vec!["taskshoot", "task", "activity", "DEV-1", "--clear"];
+            args.extend(extra);
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "expected --clear to conflict with {args:?}"
+            );
+        }
+    }
 
     fn ordering_of(args: &[&str]) -> Option<u32> {
         // Extracting the value is the point: a value_parser whose output type does not

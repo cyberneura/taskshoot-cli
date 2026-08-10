@@ -135,6 +135,29 @@ taskshoot task resume DEV-12
 taskshoot task track <uuid> --project DEV          # untracked -> tracked (assigns a number)
 ```
 
+### Showing that you are working ("typing…" indicator)
+
+Puts a transient line on the task thread so people watching it can see the bot is
+alive. It is **not** a message: nothing is stored, nothing is notified, and it
+disappears on its own.
+
+```bash
+taskshoot task activity DEV-12                    # who is shown as active right now
+taskshoot task activity DEV-12 --set              # default "typing…" state, gone in 10s
+taskshoot task activity DEV-12 --text "Searching the web…" --ttl 60
+taskshoot task activity DEV-12 --text "Searching the web…" --text-ja "Webで検索しています…"
+taskshoot task activity DEV-12 --clear            # take it down without waiting for the TTL
+```
+
+- The indicator **expires** (`--ttl`, default 10s, max 300s). For work that runs
+  longer than the TTL, call `--set` again periodically to keep it up — that is the
+  intended usage, and it is also what makes a crashed bot's indicator disappear.
+- **Posting a message clears your own indicator automatically**, so a bot that
+  ends with `task comment` / `task complete` does not need `--clear`.
+- `--text` / `--text-ja` fill in for each other, so one of them is enough. Omit
+  both to get the default typing indicator, whose wording each client renders in
+  its own language.
+
 ### Project categories (manager role or higher)
 
 ```bash
@@ -251,11 +274,13 @@ taskshoot listen --no-state                      # do not persist the cursor at 
   user. Give `me`, a handle name, a display name, or a user id. Mentions of groups the
   user belongs to are included.
 - **`--mentioned-or-assignee <user>`** is the union of `--assignee` and `--mentioned`
-  ("assigned to them **or** @-mentioning them"). Use it for "tasks meant for me" — work is
-  handed to an agent either by assigning it or by mentioning it, and each flag alone misses
-  half of it. The API filters with AND only, so the CLI sends two requests per project and
-  merges them (duplicates folded by task id, re-sorted newest-first), which means `--limit`
-  applies to each half. It cannot be combined with `--assignee` or `--mentioned`.
+  ("assigned to them **or** @-mentioning them"). The API filters with AND only, so the CLI
+  sends two requests per project and merges them (duplicates folded by task id, re-sorted
+  newest-first), which means `--limit` applies to each half. It cannot be combined with
+  `--assignee` or `--mentioned`. A bot **work loop** should NOT use this flag — filter by
+  `--assignee me` alone, because mentions are answered in real time by
+  taskshoot-socket-agent and a loop that also picks them up double-responds
+  (see the `taskshoot-agent-loop` skill).
 - **`users` / `user <spec>`** list the organization's users and show one of them; use them
   to look up the handle names and ids that `--assignee` / `--mentioned` accept. `spec` is
   the literal `me`, a handle name, a display name (both case-insensitive) or a user id,

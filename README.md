@@ -225,6 +225,10 @@ taskshoot task events DEV-12                     # show the thread (prints messa
 taskshoot task track <uuid> --project DEV        # untracked -> tracked (assigns a number)
 taskshoot task cancel DEV-12 --reason "duplicate"
 taskshoot task resume DEV-12
+taskshoot task activity DEV-12                   # who is shown as typing / working right now
+taskshoot task activity DEV-12 --set             # show yourself as typing (expires in 10s)
+taskshoot task activity DEV-12 --text "Searching the web…" --ttl 60
+taskshoot task activity DEV-12 --clear           # take your own indicator down now
 ```
 
 Emoji reactions on a message. The message id comes from `taskshoot task events`,
@@ -368,6 +372,15 @@ done
   (Japanese) or the english value
   (`done` / `invalid` / `rejected` / `cancelled` / `in_progress` / `acceptance` /
   `pre_approval`). The JSON `phase` field is returned as the english value.
+- `task activity` shows or sets a **transient** "typing / working" indicator on the task
+  thread. It is not a message: nothing is stored in the database, no notification is sent,
+  and the task's `latest_event_at` / unread state are untouched. The indicator **expires**
+  (`--ttl`, default 10s, max 300s), so a long-running bot should call `--set` again
+  periodically to keep it up — which also means a crashed bot's indicator disappears by
+  itself. Posting a message clears your own indicator automatically, so a bot that ends
+  with `task comment` / `task complete` does not need `--clear`. Omitting `--text` /
+  `--text-ja` means "the default typing indicator", whose wording each client renders in
+  its own language; passing only one of them uses it for both languages.
 - `task complete` moves to the workflow's terminal stage. If the project's workflow has an
   acceptance flow, the task enters the acceptance phase rather than being completed (by
   design). `--comment` is posted to the thread after completion succeeds.
@@ -377,10 +390,11 @@ done
   the web UI's mention rendering (handle_name, or a default handle derived from the email
   local part), and includes mentions of MentionGroups the user belongs to (`@dev-team`, …).
 - `tasks --mentioned-or-assignee <user>` is the **union** of `--assignee` and `--mentioned`:
-  "assigned to that user **or** @-mentioning them". It is what a bot loop wants (`--bot-ready
-  true --mentioned-or-assignee me`), because a task meant for a bot is sometimes handed over
-  by assigning it and sometimes by mentioning it. The API filters with AND only, so the
-  union is done client-side:
+  "assigned to that user **or** @-mentioning them". Note that a bot **work loop** should
+  filter by `--assignee me` alone: mentions are conversations, answered in real time by
+  [taskshoot-socket-agent](https://github.com/cyberneura/taskshoot-socket-agent), and a
+  loop that also picks up mentions double-responds (see the `taskshoot-agent-loop` skill).
+  The API filters with AND only, so the union is done client-side:
   - Two requests are sent **per project** (one filtered by assignee, one by mention) and
     merged, so `--limit` applies to each half; a project can return up to `2 x limit` tasks.
     A task matching both halves is returned once (folded by task id).
@@ -439,9 +453,10 @@ done
 ### Example AI-agent flow
 
 ```bash
-# find pickable, unstarted tasks that are meant for this bot (assigned to it or mentioning it)
+# find pickable, unstarted tasks handed to this bot (assigned to it; mentions are
+# handled separately by taskshoot-socket-agent)
 taskshoot tasks --project DEV --bot-ready true --status draft \
-  --exclude-phase done,invalid,rejected,cancelled --mentioned-or-assignee me --json
+  --exclude-phase done,invalid,rejected,cancelled --assignee me --json
 taskshoot task claim DEV-12 --if-unassigned --json     # claim it (avoids double-processing: 409 if taken)
 taskshoot task comment DEV-12 "Starting now" --json
 # ... development ...
