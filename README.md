@@ -240,6 +240,13 @@ taskshoot task reaction remove DEV-12 <message-id> eyes
 `taskshoot task events` shows the reactions on each message; a `*` after the
 count means you reacted with that emoji.
 
+Shortcodes that start with a hyphen (`-1`) are passed as-is — no `--` separator
+is needed:
+
+```bash
+taskshoot task reaction add DEV-12 <message-id> -1
+```
+
 Notifications (mention inbox):
 
 ```bash

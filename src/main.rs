@@ -273,7 +273,10 @@ enum ReactionCmd {
         task: String,
         /// Message id (see `taskshoot task events`)
         event: String,
-        /// Emoji shortcode, e.g. eyes (see `taskshoot task reaction emojis`)
+        /// Emoji shortcode, e.g. eyes (see `taskshoot task reaction emojis`).
+        /// `allow_hyphen_values` because some shortcodes start with a hyphen
+        /// (`-1`); without it clap reads them as an option and rejects the call.
+        #[arg(allow_hyphen_values = true)]
         emoji: String,
         #[arg(long)]
         project: Option<String>,
@@ -283,7 +286,8 @@ enum ReactionCmd {
         task: String,
         /// Message id (see `taskshoot task events`)
         event: String,
-        /// Emoji shortcode, e.g. eyes
+        /// Emoji shortcode, e.g. eyes (see the note on `add` about `-1`)
+        #[arg(allow_hyphen_values = true)]
         emoji: String,
         #[arg(long)]
         project: Option<String>,
@@ -846,6 +850,80 @@ mod tests {
             "me",
         ])
         .is_ok());
+    }
+
+    fn reaction_emoji_of(args: &[&str]) -> String {
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Task(boxed) => match *boxed {
+                TaskCmd::Reaction(ReactionCmd::Add { emoji, .. })
+                | TaskCmd::Reaction(ReactionCmd::Remove { emoji, .. }) => emoji,
+                _ => panic!("expected a reaction command"),
+            },
+            _ => panic!("expected a task command"),
+        }
+    }
+
+    #[test]
+    fn reaction_accepts_hyphen_prefixed_shortcodes() {
+        // `-1` is a real shortcode the server hands out. Without
+        // allow_hyphen_values clap reads it as an option and rejects the call
+        // before it ever reaches the API.
+        assert_eq!(
+            reaction_emoji_of(&["taskshoot", "task", "reaction", "add", "DEV-1", "ev", "-1"]),
+            "-1"
+        );
+        assert_eq!(
+            reaction_emoji_of(&[
+                "taskshoot",
+                "task",
+                "reaction",
+                "remove",
+                "DEV-1",
+                "ev",
+                "-1",
+            ]),
+            "-1"
+        );
+        assert_eq!(
+            reaction_emoji_of(&[
+                "taskshoot",
+                "task",
+                "reaction",
+                "add",
+                "DEV-1",
+                "ev",
+                "eyes"
+            ]),
+            "eyes"
+        );
+    }
+
+    #[test]
+    fn reaction_still_takes_project_option() {
+        // allow_hyphen_values is scoped to the positional, so --project keeps working.
+        match Cli::try_parse_from([
+            "taskshoot",
+            "task",
+            "reaction",
+            "add",
+            "DEV-1",
+            "ev",
+            "-1",
+            "--project",
+            "DEV",
+        ])
+        .expect("should parse")
+        .command
+        {
+            Cmd::Task(boxed) => match *boxed {
+                TaskCmd::Reaction(ReactionCmd::Add { project, emoji, .. }) => {
+                    assert_eq!(project.as_deref(), Some("DEV"));
+                    assert_eq!(emoji, "-1");
+                }
+                _ => panic!("expected a reaction add command"),
+            },
+            _ => panic!("expected a task command"),
+        }
     }
 
     fn tasks_include_archived_of(args: &[&str]) -> bool {
