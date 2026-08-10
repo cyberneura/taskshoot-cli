@@ -100,8 +100,9 @@ enum Cmd {
         #[arg(long)]
         mentioned: Option<String>,
         /// Filter to tasks assigned to the user OR mentioning them (the union
-        /// of --assignee and --mentioned; bot loops use
-        /// --mentioned-or-assignee me). Sent as two requests per project and
+        /// of --assignee and --mentioned). Bot work loops should use
+        /// --assignee me instead: mentions are answered in real time by
+        /// taskshoot-socket-agent. Sent as two requests per project and
         /// merged, so --limit applies to each half
         #[arg(long, conflicts_with_all = ["assignee", "mentioned"])]
         mentioned_or_assignee: Option<String>,
