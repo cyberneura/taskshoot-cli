@@ -265,6 +265,33 @@ enum CategoryCmd {
     },
 }
 
+/// Emoji reactions on a message. Message ids come from `taskshoot task events`.
+#[derive(Subcommand)]
+enum ReactionCmd {
+    /// Add a reaction (idempotent: adding the same emoji twice is a no-op)
+    Add {
+        task: String,
+        /// Message id (see `taskshoot task events`)
+        event: String,
+        /// Emoji shortcode, e.g. eyes (see `taskshoot task reaction emojis`)
+        emoji: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Remove your own reaction (idempotent)
+    Remove {
+        task: String,
+        /// Message id (see `taskshoot task events`)
+        event: String,
+        /// Emoji shortcode, e.g. eyes
+        emoji: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// List the emoji shortcodes the server accepts
+    Emojis,
+}
+
 #[derive(Subcommand)]
 enum TaskCmd {
     /// Show task details
@@ -387,6 +414,9 @@ enum TaskCmd {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Add or remove an emoji reaction on a message in the thread
+    #[command(subcommand)]
+    Reaction(ReactionCmd),
     /// Promote an untracked task to tracked (assigns a task number)
     Track {
         task: String,
@@ -618,6 +648,23 @@ fn run() -> Result<()> {
             TaskCmd::Events { task, project } => {
                 commands::events(&api, &task, project.as_deref(), json)
             }
+            TaskCmd::Reaction(cmd) => match cmd {
+                ReactionCmd::Add {
+                    task,
+                    event,
+                    emoji,
+                    project,
+                } => commands::add_reaction(&api, &task, project.as_deref(), &event, &emoji, json),
+                ReactionCmd::Remove {
+                    task,
+                    event,
+                    emoji,
+                    project,
+                } => {
+                    commands::remove_reaction(&api, &task, project.as_deref(), &event, &emoji, json)
+                }
+                ReactionCmd::Emojis => commands::reaction_emojis(&api, json),
+            },
             TaskCmd::Track { task, project } => {
                 commands::track(&api, &task, project.as_deref(), json)
             }
