@@ -221,7 +221,7 @@ taskshoot task claim DEV-12                     # assignee=me + move to in-progr
 taskshoot task claim DEV-12 --if-unassigned     # claim only if unassigned (409 if already taken)
 taskshoot task complete DEV-12 --comment "Done"     # move to the terminal stage
 taskshoot task comment DEV-12 "progress update" --file ./screenshot.png
-taskshoot task events DEV-12                     # show the thread
+taskshoot task events DEV-12                     # show the thread (prints message ids)
 taskshoot task track <uuid> --project DEV        # untracked -> tracked (assigns a number)
 taskshoot task cancel DEV-12 --reason "duplicate"
 taskshoot task resume DEV-12
@@ -229,6 +229,26 @@ taskshoot task activity DEV-12                   # who is shown as typing / work
 taskshoot task activity DEV-12 --set             # show yourself as typing (expires in 10s)
 taskshoot task activity DEV-12 --text "Searching the web…" --ttl 60
 taskshoot task activity DEV-12 --clear           # take your own indicator down now
+```
+
+Emoji reactions on a message. The message id comes from `taskshoot task events`,
+and the emoji is a shortcode (not the character itself). Both add and remove are
+idempotent, so a retry never double-counts:
+
+```bash
+taskshoot task reaction emojis                  # shortcodes the server accepts
+taskshoot task reaction add DEV-12 <message-id> eyes
+taskshoot task reaction remove DEV-12 <message-id> eyes
+```
+
+`taskshoot task events` shows the reactions on each message; a `*` after the
+count means you reacted with that emoji.
+
+Shortcodes that start with a hyphen (`-1`) are passed as-is — no `--` separator
+is needed:
+
+```bash
+taskshoot task reaction add DEV-12 <message-id> -1
 ```
 
 Notifications (mention inbox):

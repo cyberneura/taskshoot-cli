@@ -224,6 +224,45 @@ impl Api {
         )
     }
 
+    /// Emoji shortcodes that can be used for reactions (server-defined).
+    pub fn reaction_emojis(&self) -> Result<Value> {
+        self.get(&self.org_path("reaction-emojis/")?)
+    }
+
+    /// Add a reaction to a message. Idempotent: adding the same emoji twice is
+    /// a no-op server-side.
+    pub fn add_reaction(
+        &self,
+        project: &str,
+        task_ref: &str,
+        event_id: &str,
+        emoji: &str,
+    ) -> Result<Value> {
+        self.post(
+            &self.task_path(
+                project,
+                task_ref,
+                &format!("/events/{}/reactions/", enc(event_id)),
+            )?,
+            &json!({ "emoji": emoji }),
+        )
+    }
+
+    /// Remove your own reaction from a message. Idempotent.
+    pub fn remove_reaction(
+        &self,
+        project: &str,
+        task_ref: &str,
+        event_id: &str,
+        emoji: &str,
+    ) -> Result<Value> {
+        self.delete(&self.task_path(
+            project,
+            task_ref,
+            &format!("/events/{}/reactions/{}", enc(event_id), enc(emoji)),
+        )?)
+    }
+
     pub fn post_comment_with_files(
         &self,
         project: &str,

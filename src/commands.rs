@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::api::{from_value, Api, TasksQuery};
 use crate::models::{
-    AssignableUser, Me, MentionCandidate, NotificationList, Org, OrgUser, Project, SearchResult,
-    Task, TaskCategory, TaskEvent, Workflow,
+    AssignableUser, Me, MentionCandidate, NotificationList, Org, OrgUser, Project, ReactionEmoji,
+    SearchResult, Task, TaskCategory, TaskEvent, Workflow,
 };
 use crate::output::{print_table, truncate_width};
 use crate::stages;
@@ -1573,11 +1573,13 @@ pub fn events(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
     let items: Vec<TaskEvent> = from_value(value)?;
     for event in &items {
         let time: String = event.created_at.chars().take(19).collect();
+        // The id is printed because `task reaction add/remove` takes it.
         println!(
-            "[{}] {} ({})",
+            "[{}] {} ({}) {}",
             time.replace('T', " "),
             author_name(&event.author),
-            event.event_type
+            event.event_type,
+            event.id
         );
         for line in event.content.lines() {
             println!("  {line}");
@@ -1599,7 +1601,71 @@ pub fn events(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
                 attachment.filename, attachment.file_size
             );
         }
+        if !event.reactions.is_empty() {
+            let chips: Vec<String> = event
+                .reactions
+                .iter()
+                .map(|r| {
+                    // A shortcode the server no longer knows comes back with an
+                    // empty character; show the raw shortcode instead of nothing.
+                    let face = if r.character.is_empty() {
+                        format!(":{}:", r.emoji)
+                    } else {
+                        r.character.clone()
+                    };
+                    let mine = if r.reacted { "*" } else { "" };
+                    format!("{face} {}{mine} (:{}:)", r.count, r.emoji)
+                })
+                .collect();
+            println!("  reactions: {}", chips.join("  "));
+        }
         println!();
+    }
+    Ok(())
+}
+
+pub fn add_reaction(
+    api: &Api,
+    task_arg: &str,
+    project: Option<&str>,
+    event_id: &str,
+    emoji: &str,
+    json: bool,
+) -> Result<()> {
+    let (project, task_ref) = resolve_target(task_arg, project)?;
+    let value = api.add_reaction(&project, &task_ref, event_id, emoji)?;
+    if json {
+        return print_json(&value);
+    }
+    println!("reacted :{emoji}: on {event_id}");
+    Ok(())
+}
+
+pub fn remove_reaction(
+    api: &Api,
+    task_arg: &str,
+    project: Option<&str>,
+    event_id: &str,
+    emoji: &str,
+    json: bool,
+) -> Result<()> {
+    let (project, task_ref) = resolve_target(task_arg, project)?;
+    let value = api.remove_reaction(&project, &task_ref, event_id, emoji)?;
+    if json {
+        return print_json(&value);
+    }
+    println!("removed :{emoji}: from {event_id}");
+    Ok(())
+}
+
+pub fn reaction_emojis(api: &Api, json: bool) -> Result<()> {
+    let value = api.reaction_emojis()?;
+    if json {
+        return print_json(&value);
+    }
+    let items: Vec<ReactionEmoji> = from_value(value)?;
+    for item in &items {
+        println!("{}\t:{}:", item.character, item.emoji);
     }
     Ok(())
 }

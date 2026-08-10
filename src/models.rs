@@ -149,6 +149,10 @@ pub struct TaskCategory {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaskEvent {
+    /// Message id. Needed to target a message with `reaction add/remove`.
+    /// `#[serde(default)]` so an older server that omits it still parses.
+    #[serde(default)]
+    pub id: String,
     pub event_type: String,
     pub author: Option<TaskAuthor>,
     #[serde(default)]
@@ -158,7 +162,37 @@ pub struct TaskEvent {
     pub metadata: serde_json::Value,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// Emoji reactions on this message, folded per emoji.
+    /// `#[serde(default)]` so an older server that omits it still parses.
+    ///
+    /// The server also returns `reactions_revision` for ordering concurrent
+    /// snapshots; it is deliberately not deserialized here because the CLI
+    /// prints one response and exits, so it has nothing to order against.
+    #[serde(default)]
+    pub reactions: Vec<TaskEventReaction>,
     pub created_at: String,
+}
+
+/// One emoji's worth of reactions on a message (folded across users).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskEventReaction {
+    /// Shortcode (`eyes`, `+1`). This is what `reaction add/remove` takes.
+    pub emoji: String,
+    /// Display character. Empty for a shortcode the server no longer knows.
+    #[serde(default)]
+    pub character: String,
+    pub count: i64,
+    /// Whether the calling user reacted with this emoji.
+    #[serde(default)]
+    pub reacted: bool,
+}
+
+/// An emoji available for reactions (`taskshoot task reaction emojis`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactionEmoji {
+    pub emoji: String,
+    #[serde(default)]
+    pub character: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
