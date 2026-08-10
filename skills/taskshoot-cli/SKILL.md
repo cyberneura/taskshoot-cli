@@ -251,11 +251,13 @@ taskshoot listen --no-state                      # do not persist the cursor at 
   user. Give `me`, a handle name, a display name, or a user id. Mentions of groups the
   user belongs to are included.
 - **`--mentioned-or-assignee <user>`** is the union of `--assignee` and `--mentioned`
-  ("assigned to them **or** @-mentioning them"). Use it for "tasks meant for me" — work is
-  handed to an agent either by assigning it or by mentioning it, and each flag alone misses
-  half of it. The API filters with AND only, so the CLI sends two requests per project and
-  merges them (duplicates folded by task id, re-sorted newest-first), which means `--limit`
-  applies to each half. It cannot be combined with `--assignee` or `--mentioned`.
+  ("assigned to them **or** @-mentioning them"). The API filters with AND only, so the CLI
+  sends two requests per project and merges them (duplicates folded by task id, re-sorted
+  newest-first), which means `--limit` applies to each half. It cannot be combined with
+  `--assignee` or `--mentioned`. A bot **work loop** should NOT use this flag — filter by
+  `--assignee me` alone, because mentions are answered in real time by
+  taskshoot-socket-agent and a loop that also picks them up double-responds
+  (see the `taskshoot-agent-loop` skill).
 - **`users` / `user <spec>`** list the organization's users and show one of them; use them
   to look up the handle names and ids that `--assignee` / `--mentioned` accept. `spec` is
   the literal `me`, a handle name, a display name (both case-insensitive) or a user id,
