@@ -204,6 +204,16 @@ enum NotificationsCmd {
         /// Only unread notifications
         #[arg(long)]
         unread_only: bool,
+        /// Notification types to list (repeatable and comma-separated; e.g.
+        /// task_mentioned,task_assigned). Default: every type. An unknown type
+        /// is rejected by the server rather than silently ignored
+        #[arg(long, value_delimiter = ',')]
+        types: Vec<String>,
+        /// List notifications older than this notification id. Pass the last
+        /// ID of a page to walk further back; a page holds at most 100, so a
+        /// deeper backlog is only reachable this way
+        #[arg(long)]
+        before: Option<String>,
     },
     /// Mark notifications as read (by id, or --all). Prints the updated unread
     /// count. Requires a write API key.
@@ -754,9 +764,19 @@ fn run() -> Result<()> {
             },
         ),
         Cmd::Notifications(notifications_cmd) => match notifications_cmd {
-            NotificationsCmd::List { limit, unread_only } => {
-                commands::notifications_list(&api, limit, unread_only, json)
-            }
+            NotificationsCmd::List {
+                limit,
+                unread_only,
+                types,
+                before,
+            } => commands::notifications_list(
+                &api,
+                limit,
+                unread_only,
+                &types,
+                before.as_deref(),
+                json,
+            ),
             NotificationsCmd::Read { ids, all } => {
                 commands::notifications_read(&api, &ids, all, json)
             }

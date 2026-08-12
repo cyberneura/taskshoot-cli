@@ -333,12 +333,20 @@ impl Api {
     }
 
     /// List notifications addressed to you (user-scoped, org-independent).
-    pub fn notifications(&self, limit: u32, unread_only: bool) -> Result<Value> {
-        let mut path = format!("/api/user/notifications?limit={limit}");
-        if unread_only {
-            path.push_str("&unread_only=true");
-        }
-        self.get(&path)
+    ///
+    /// `types` filters by notification type (empty = every type); the server
+    /// rejects an unknown spelling rather than returning nothing. `before` is a
+    /// notification id: pass the last id of a page to get the one behind it.
+    /// The server caps a page at 100, so a backlog deeper than that is only
+    /// reachable with the cursor.
+    pub fn notifications(
+        &self,
+        limit: u32,
+        unread_only: bool,
+        types: &[String],
+        before: Option<&str>,
+    ) -> Result<Value> {
+        self.get(&notifications_path(limit, unread_only, types, before))
     }
 
     /// Mark notifications as read (by ids, or all=true). Returns the updated unread count.
@@ -369,5 +377,73 @@ fn extract_detail(body: &str) -> String {
             None => truncate(body.trim(), 300),
         },
         Err(_) => truncate(body.trim(), 300),
+    }
+}
+
+/// Build the query for the notifications list.
+///
+/// Split out from the request so the parameter shape can be tested without a
+/// server: `types` is sent as one comma-separated value (the same spelling the
+/// WebSocket takes) rather than repeated parameters, and both user-supplied
+/// values are percent-encoded.
+fn notifications_path(
+    limit: u32,
+    unread_only: bool,
+    types: &[String],
+    before: Option<&str>,
+) -> String {
+    let mut path = format!("/api/user/notifications?limit={limit}");
+    if unread_only {
+        path.push_str("&unread_only=true");
+    }
+    let joined = types.join(",");
+    if !joined.is_empty() {
+        path.push_str(&format!("&types={}", enc(&joined)));
+    }
+    if let Some(before) = before {
+        path.push_str(&format!("&before={}", enc(before)));
+    }
+    path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notifications_path_defaults_to_no_filter() {
+        assert_eq!(
+            notifications_path(30, false, &[], None),
+            "/api/user/notifications?limit=30"
+        );
+    }
+
+    #[test]
+    fn notifications_path_joins_types_with_commas() {
+        let types = vec!["task_mentioned".to_string(), "task_assigned".to_string()];
+        assert_eq!(
+            notifications_path(30, false, &types, None),
+            "/api/user/notifications?limit=30&types=task_mentioned%2Ctask_assigned"
+        );
+    }
+
+    #[test]
+    fn notifications_path_carries_the_cursor_and_unread_only() {
+        assert_eq!(
+            notifications_path(100, true, &[], Some("019ff4-cursor")),
+            "/api/user/notifications?limit=100&unread_only=true&before=019ff4-cursor"
+        );
+    }
+
+    #[test]
+    fn notifications_path_encodes_user_supplied_values() {
+        // A bad cursor belongs to the server to reject; it must not be able to
+        // graft extra query parameters on the way there.
+        let types = vec!["a&limit=1".to_string()];
+        let path = notifications_path(30, false, &types, Some("b&unread_only=true"));
+        assert_eq!(
+            path,
+            "/api/user/notifications?limit=30&types=a%26limit%3D1&before=b%26unread_only%3Dtrue"
+        );
     }
 }
