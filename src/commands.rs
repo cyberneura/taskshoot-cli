@@ -1816,8 +1816,15 @@ fn print_activities(value: &Value) -> Result<()> {
     Ok(())
 }
 
-pub fn notifications_list(api: &Api, limit: u32, unread_only: bool, json: bool) -> Result<()> {
-    let value = api.notifications(limit.clamp(1, 100), unread_only)?;
+pub fn notifications_list(
+    api: &Api,
+    limit: u32,
+    unread_only: bool,
+    types: &[String],
+    before: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let value = api.notifications(limit.clamp(1, 100), unread_only, types, before)?;
     if json {
         return print_json(&value);
     }

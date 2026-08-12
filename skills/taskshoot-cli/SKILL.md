@@ -181,9 +181,28 @@ the task form while keeping it on those tasks.
 ```bash
 taskshoot notifications list                     # your notifications (newest first) + unread count
 taskshoot notifications list --unread-only
+taskshoot notifications list --types task_mentioned,task_assigned   # only these types
+taskshoot notifications list --before <id>       # the page behind this notification
 taskshoot notifications read <id> [<id> ...]     # mark ids read (needs a write key)
 taskshoot notifications read --all
 ```
+
+`--types` takes the same spelling as `listen --types` (comma-separated). An unknown type is
+rejected by the server rather than silently returning nothing, so a typo cannot look like
+"no notifications".
+
+**A page holds at most 100.** When unread notifications of types you do not act on pile up,
+the ones you do care about get pushed off the first page — `--types` keeps them in view, and
+`--before` walks further back. Pass the last `ID` of a page to get the page behind it, and
+stop when a page comes back empty:
+
+```bash
+taskshoot notifications list --types task_mentioned --limit 100 --json
+taskshoot notifications list --types task_mentioned --limit 100 --before <last id> --json
+```
+
+`unread_count` is the total unread count regardless of the filter, so it does not shrink as
+you page — do not use it to decide when to stop.
 
 ### Streaming that inbox (`listen`)
 

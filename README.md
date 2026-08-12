@@ -258,6 +258,8 @@ Notifications (mention inbox):
 taskshoot notifications list                   # your notifications (newest first) + unread count
 taskshoot notifications list --unread-only     # unread only
 taskshoot notifications list --limit 50 --json # for AI agents (max 100)
+taskshoot notifications list --types task_mentioned,task_assigned  # only these types
+taskshoot notifications list --before <id>     # the page behind this notification
 taskshoot notifications read <id> [<id> ...]   # mark ids read (needs a write key)
 taskshoot notifications read --all             # mark all read
 ```
