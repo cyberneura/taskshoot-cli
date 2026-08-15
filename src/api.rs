@@ -32,6 +32,10 @@ pub struct TasksQuery {
     pub assignee_id: Option<String>,
     pub mentioned_user_id: Option<String>,
     pub bot_ready: Option<bool>,
+    /// Category ids to match. Multiple values are OR'd. Empty means no
+    /// category filter. Ids rather than names, because a category name is
+    /// only unique within a project.
+    pub category_ids: Vec<String>,
 }
 
 pub struct Api {
@@ -156,11 +160,18 @@ impl Api {
         if let Some(bot_ready) = query.bot_ready {
             path.push_str(&format!("&bot_ready={bot_ready}"));
         }
+        for category_id in &query.category_ids {
+            path.push_str(&format!("&category_id={}", enc(category_id)));
+        }
         self.get(&path)
     }
 
-    pub fn search_tasks(&self, q: &str, limit: u32) -> Result<Value> {
-        self.get(&self.org_path(&format!("task-search/?q={}&limit={limit}", enc(q)))?)
+    pub fn search_tasks(&self, q: &str, limit: u32, category_ids: &[String]) -> Result<Value> {
+        let mut path = self.org_path(&format!("task-search/?q={}&limit={limit}", enc(q)))?;
+        for category_id in category_ids {
+            path.push_str(&format!("&category_id={}", enc(category_id)));
+        }
+        self.get(&path)
     }
 
     pub fn task_detail(&self, project: &str, task_ref: &str) -> Result<Value> {
@@ -304,6 +315,12 @@ impl Api {
     }
 
     /// Create a task category. Requires the manager role or higher.
+    /// Every project's task categories in one request. Resolving a category
+    /// name organization-wide otherwise costs a request per project.
+    pub fn organization_task_categories(&self) -> Result<Value> {
+        self.get(&self.org_path("task-categories/")?)
+    }
+
     pub fn create_task_category(&self, project: &str, body: &Value) -> Result<Value> {
         self.post(&self.project_path(project, "task-categories/")?, body)
     }

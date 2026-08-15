@@ -454,6 +454,77 @@ fn resolve_category_id(api: &Api, project: &str, spec: &str) -> Result<Option<St
     }
 }
 
+/// Resolve the `--category` specs of one project into category ids.
+///
+/// A category name is only unique within a project (the API takes ids for
+/// exactly that reason), so this runs per project, the same way a status label
+/// does. `strictness` decides what an unknown name means: named with
+/// `--project` it is an error, in a sweep it simply matches nothing *here*
+/// while the other names still apply.
+fn resolve_list_categories(
+    api: &Api,
+    project: &str,
+    specs: &[String],
+    strictness: LabelStrictness,
+) -> Result<Vec<String>> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut ids: Vec<String> = Vec::new();
+    // Fetched on the first name that needs it, so a filter given entirely as
+    // ids costs no extra request -- which matters in a sweep, where this runs
+    // once per project.
+    let mut categories: Option<Vec<TaskCategory>> = None;
+    for spec in specs {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            bail!("empty category value (check for a stray comma)");
+        }
+        // A UUID is taken as given: it may well belong to another project of
+        // the sweep, in which case it simply matches nothing here.
+        if Uuid::parse_str(spec).is_ok() {
+            if !ids.iter().any(|id| id == spec) {
+                ids.push(spec.to_string());
+            }
+            continue;
+        }
+        let categories = match &categories {
+            Some(categories) => categories,
+            None => categories.insert(from_value(api.task_categories(project)?)?),
+        };
+        let needle = spec.to_lowercase();
+        let matches: Vec<&TaskCategory> = categories
+            .iter()
+            .filter(|c| c.name.to_lowercase() == needle)
+            .collect();
+        match matches.len() {
+            1 => {
+                let id = matches[0].id.clone();
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            // An ambiguous name is undecidable here whatever the strictness:
+            // the project genuinely has two categories by that name.
+            0 if strictness == LabelStrictness::Strict => {
+                return Err(Error::new(UnanswerableProject::NoCategoryResolved(
+                    format!(
+                        "unknown category '{spec}' in this project; available: {}",
+                        categories
+                            .iter()
+                            .map(|c| c.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )));
+            }
+            0 => {}
+            _ => bail!("category name '{spec}' is ambiguous; specify a category id"),
+        }
+    }
+    Ok(ids)
+}
+
 /// How `tasks` reports its result. Both fields are output modes rather than
 /// filters, so they are grouped here instead of in `TasksFilter`.
 #[derive(Clone, Copy)]
@@ -475,6 +546,9 @@ pub struct ProjectScope {
 
 pub struct TasksFilter {
     pub status: Vec<String>,
+    /// Category names or ids. Multiple values are OR'd; empty means no
+    /// category filter.
+    pub category: Vec<String>,
     pub exclude_status: Vec<String>,
     pub exclude_phase: Vec<String>,
     pub assignee: Option<String>,
@@ -543,6 +617,10 @@ enum UnanswerableProject {
     /// A `--status` filter was given but not one of its labels exists in this
     /// project, so the filter selects nothing at all here.
     NoStatusResolved(String),
+    /// A `--category` filter was given but the project defines none of the
+    /// names, so the filter selects nothing at all here. Like a status label,
+    /// a category name is per project.
+    NoCategoryResolved(String),
 }
 
 impl std::fmt::Display for UnanswerableProject {
@@ -550,7 +628,8 @@ impl std::fmt::Display for UnanswerableProject {
         match self {
             Self::UnknownStatus(message)
             | Self::AmbiguousStatus(message)
-            | Self::NoStatusResolved(message) => f.write_str(message),
+            | Self::NoStatusResolved(message)
+            | Self::NoCategoryResolved(message) => f.write_str(message),
         }
     }
 }
@@ -996,6 +1075,18 @@ fn project_tasks(
     // nothing to exclude here is a real answer, not a different question.
     let exclude_status =
         resolve_list_statuses(api, project, &filter.exclude_status, shared.strictness)?;
+    // Same shape as the status filter: an include filter that resolves to
+    // nothing here selects nothing, which is a different question from the one
+    // asked, so the project is dropped rather than listed empty.
+    let category_ids = resolve_list_categories(api, project, &filter.category, shared.strictness)?;
+    if !filter.category.is_empty() && category_ids.is_empty() {
+        return Err(Error::new(UnanswerableProject::NoCategoryResolved(
+            format!(
+                "none of the requested categories ({}) exist in this project",
+                filter.category.join(", ")
+            ),
+        )));
+    }
     let has_user_filter = shared
         .user_filters
         .iter()
@@ -1004,6 +1095,7 @@ fn project_tasks(
         || !exclude_status.is_empty()
         || !shared.exclude_phase.is_empty()
         || has_user_filter
+        || !category_ids.is_empty()
         || filter.bot_ready.is_some();
     // exclude drops by numeric value on the server, so tasks with a different
     // label sharing that value are swept in too. The client cannot restore them
@@ -1036,6 +1128,7 @@ fn project_tasks(
                 assignee_id: user_filter.assignee_id.map(str::to_string),
                 mentioned_user_id: user_filter.mentioned_user_id.map(str::to_string),
                 bot_ready: filter.bot_ready,
+                category_ids: category_ids.clone(),
             },
         )?;
         let mut page: Vec<Value> = from_value(value)?;
@@ -1235,8 +1328,9 @@ fn task_row(task: &Task, multi: bool) -> Vec<String> {
     row
 }
 
-pub fn search(api: &Api, query: &str, limit: u32, json: bool) -> Result<()> {
-    let value = api.search_tasks(query, limit.clamp(1, 50))?;
+pub fn search(api: &Api, query: &str, limit: u32, categories: &[String], json: bool) -> Result<()> {
+    let category_ids = resolve_search_categories(api, categories)?;
+    let value = api.search_tasks(query, limit.clamp(1, 50), &category_ids)?;
     if json {
         return print_json(&value);
     }
@@ -1257,6 +1351,69 @@ pub fn search(api: &Api, query: &str, limit: u32, json: bool) -> Result<()> {
         .collect();
     print_table(&["REF", "STATUS", "TITLE"], &rows);
     Ok(())
+}
+
+/// Resolve the `--category` specs of an organization-wide search into ids.
+///
+/// Search spans every project, and a category name is only unique within one,
+/// so a name is resolved to *every* category with that name across the
+/// organization and the ids are OR'd. Asking for "bug" therefore means "the
+/// bug category of whichever project the task is in", which is the question
+/// worth asking here. A name no project defines is an error: it would
+/// otherwise silently match nothing.
+fn resolve_search_categories(api: &Api, specs: &[String]) -> Result<Vec<String>> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut ids: Vec<String> = Vec::new();
+    let mut catalog: Option<Vec<TaskCategory>> = None;
+    for spec in specs {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            bail!("empty category value (check for a stray comma)");
+        }
+        if Uuid::parse_str(spec).is_ok() {
+            if !ids.iter().any(|id| id == spec) {
+                ids.push(spec.to_string());
+            }
+            continue;
+        }
+        // One request for the whole organization, and only once a name
+        // actually needs resolving.
+        let catalog = match &catalog {
+            Some(catalog) => catalog,
+            None => catalog.insert(from_value(api.organization_task_categories()?)?),
+        };
+        let needle = spec.to_lowercase();
+        let matched: Vec<&String> = catalog
+            .iter()
+            .filter(|category| category.name.to_lowercase() == needle)
+            .map(|category| &category.id)
+            .collect();
+        if matched.is_empty() {
+            bail!(
+                "unknown category '{spec}' in this organization; available: {}",
+                category_names(catalog).join(", ")
+            );
+        }
+        for id in matched {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// The distinct category names of a catalog, for an error message.
+fn category_names(catalog: &[TaskCategory]) -> Vec<&str> {
+    let mut names: Vec<&str> = Vec::new();
+    for category in catalog {
+        if !names.contains(&category.name.as_str()) {
+            names.push(&category.name);
+        }
+    }
+    names
 }
 
 pub fn show(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> Result<()> {
