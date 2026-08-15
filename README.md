@@ -205,12 +205,15 @@ taskshoot tasks --project DEV --mentioned suzuki   # a specific person (handle /
 taskshoot tasks --project DEV --mentioned-or-assignee me   # assigned to you OR @-mentioning you
 taskshoot tasks --project DEV --untracked      # casual tasks only
 taskshoot tasks --project DEV --tracked        # numbered tasks only
+taskshoot tasks --project DEV --category bug   # only this category (name or id)
+taskshoot tasks --project DEV --category bug,chore          # multiple values are OR'd
 taskshoot tasks --project DEV --bot-ready true # only tasks a bot may pick up
 taskshoot tasks --project DEV --bot-ready true --count         # just how many matched (prints "3")
 taskshoot tasks --bot-ready true --count --json                # {"count": 3}
 
 taskshoot search "search index"                # org-wide task search (--limit 1-50)
 taskshoot search DEV-12                         # a KEY-number reference matches directly
+taskshoot search deploy --category bug          # narrow to a category (name or id)
 
 taskshoot task show DEV-12
 taskshoot task create --project DEV --title "New feature" --description "..." --assignee me
@@ -358,6 +361,20 @@ done
   `--exclude-status` means "matches none". The two are mutually exclusive. Both are
   server-side filters, so they apply *before* the `limit` truncation (more accurate than
   filtering with `jq`).
+- `tasks --category` filters by task category, given as a **name (case-insensitive) or an
+  id**, and accepts multiple values (comma-separated or by repeating the flag) which are
+  OR'd. It is a server-side filter, so it too applies before the `limit` truncation.
+  - A category name is only unique **within a project** (the API takes ids for that
+    reason), so a name is resolved per project, the same way a status label is. In a
+    `--project`-less sweep, a project defining none of the names is skipped with a warning
+    rather than listed empty; naming the project with `--project` makes it an error.
+  - A value that is already a UUID is passed through untouched, so an id belonging to
+    another project of the sweep simply matches nothing there.
+- `search --category` filters the organization-wide search the same way. Search spans
+  every project and a name is not unique across them, so a **name matches that category in
+  every project that defines it** (the ids are OR'd). A name no project defines is an
+  error rather than an empty result. The names are resolved with one organization-wide
+  request, and only when a name (rather than an id) is actually given.
 - **Caveat when passing a label to `--exclude-status`**: the server can only filter status
   by its numeric value, so if another workflow assigns a different label to the same value,
   tasks with that label are excluded too. The `--status` (include) path can correct this

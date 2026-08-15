@@ -115,6 +115,13 @@ enum Cmd {
         /// Filter by Bot Ready flag (true/false); bot loops use --bot-ready true
         #[arg(long)]
         bot_ready: Option<bool>,
+        /// Filter by category: name (case-insensitive) or id (server-side).
+        /// Repeatable and comma-separated; multiple values are OR'd
+        /// (e.g. --category bug,chore). A name is resolved per project, since
+        /// that is the only scope it is unique in -- in a --project-less sweep
+        /// a project defining none of the names is skipped with a warning
+        #[arg(long, value_delimiter = ',')]
+        category: Vec<String>,
         /// Also sweep archived projects, which are skipped by default. Rejected
         /// together with --project, which always lists the project it names,
         /// archived or not
@@ -140,6 +147,12 @@ enum Cmd {
         /// Max results (1-50)
         #[arg(long, default_value_t = 20)]
         limit: u32,
+        /// Filter by category: name (case-insensitive) or id (server-side).
+        /// Repeatable and comma-separated; multiple values are OR'd. Search
+        /// spans every project and a category name is only unique within one,
+        /// so a name matches that category in every project that defines it
+        #[arg(long, value_delimiter = ',')]
+        category: Vec<String>,
     },
     /// Operate on a single task (reference: KEY-N, or UUID with --project)
     // TaskCmd is by far the largest variant (Update/Create etc. have many fields),
@@ -573,6 +586,7 @@ fn run() -> Result<()> {
             untracked,
             tracked,
             bot_ready,
+            category,
             include_archived_projects,
             limit,
             count,
@@ -592,13 +606,18 @@ fn run() -> Result<()> {
                 untracked,
                 tracked,
                 bot_ready,
+                category,
                 limit,
             },
             // json and count are both output modes; a struct keeps them from
             // being swapped at the call site
             commands::TasksOutput { json, count },
         ),
-        Cmd::Search { query, limit } => commands::search(&api, &query, limit, json),
+        Cmd::Search {
+            query,
+            limit,
+            category,
+        } => commands::search(&api, &query, limit, &category, json),
         Cmd::Task(task_cmd) => match *task_cmd {
             TaskCmd::Show { task, project } => {
                 commands::show(&api, &task, project.as_deref(), json)
@@ -948,6 +967,85 @@ mod tests {
                 .is_err(),
                 "--ordering={value} should be rejected"
             );
+        }
+    }
+
+    fn tasks_categories_of(args: &[&str]) -> Vec<String> {
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Tasks { category, .. } => category,
+            _ => panic!("expected the tasks command"),
+        }
+    }
+
+    #[test]
+    fn tasks_category_accepts_comma_separated_and_repeated_values() {
+        assert!(tasks_categories_of(&["taskshoot", "tasks"]).is_empty());
+        assert_eq!(
+            tasks_categories_of(&["taskshoot", "tasks", "--category", "bug,chore"]),
+            ["bug", "chore"]
+        );
+        assert_eq!(
+            tasks_categories_of(&[
+                "taskshoot",
+                "tasks",
+                "--category",
+                "bug",
+                "--category",
+                "chore,docs",
+            ]),
+            ["bug", "chore", "docs"]
+        );
+    }
+
+    #[test]
+    fn tasks_category_combines_with_the_other_filters() {
+        // --category is an additional axis, not an alternative to any of them
+        let args = [
+            "taskshoot",
+            "tasks",
+            "--project",
+            "DEV",
+            "--status",
+            "draft",
+            "--category",
+            "bug",
+            "--bot-ready",
+            "true",
+        ];
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Tasks {
+                status,
+                category,
+                bot_ready,
+                ..
+            } => {
+                assert_eq!(status, ["draft"]);
+                assert_eq!(category, ["bug"]);
+                assert_eq!(bot_ready, Some(true));
+            }
+            _ => panic!("expected the tasks command"),
+        }
+    }
+
+    #[test]
+    fn search_category_accepts_comma_separated_and_repeated_values() {
+        let args = [
+            "taskshoot",
+            "search",
+            "deploy",
+            "--category",
+            "bug,chore",
+            "--category",
+            "docs",
+        ];
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Search {
+                query, category, ..
+            } => {
+                assert_eq!(query, "deploy");
+                assert_eq!(category, ["bug", "chore", "docs"]);
+            }
+            _ => panic!("expected the search command"),
         }
     }
 

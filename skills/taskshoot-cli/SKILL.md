@@ -100,6 +100,8 @@ taskshoot tasks --project DEV --status draft --assignee me
 taskshoot tasks --project DEV --status draft,in-progress            # multiple values are OR'd
 taskshoot tasks --project DEV --exclude-status done                # exclude a status (exclusive with --status)
 taskshoot tasks --project DEV --exclude-phase done,invalid,rejected,cancelled  # drop terminal tasks
+taskshoot tasks --project DEV --category bug                        # only this category (name or id)
+taskshoot tasks --project DEV --category bug,chore                 # multiple values are OR'd
 taskshoot tasks --project DEV --mentioned me    # tasks that @-mention you
 taskshoot tasks --project DEV --mentioned-or-assignee me   # assigned to you OR @-mentioning you
 taskshoot tasks --project DEV --bot-ready true  # only tasks a bot may pick up
@@ -109,6 +111,7 @@ taskshoot tasks --bot-ready true --count --json # {"count": 3}
 
 taskshoot search "search index"                 # org-wide task search (--limit 1-50)
 taskshoot search DEV-12                          # a KEY-number reference matches directly
+taskshoot search deploy --category bug           # narrow to a category (name or id)
 
 taskshoot task show DEV-12                       # details (bot_ready / assignee / phase / status)
 taskshoot task events DEV-12                     # show the chat thread
@@ -289,6 +292,13 @@ taskshoot listen --no-state                      # do not persist the cursor at 
   filtering the JSON with `jq`. `--status` accepts a label or a numeric value; if a label
   maps to more than one workflow value it errors, so pass the numeric value (look it up
   with `taskshoot workflows --project <KEY>`).
+- **`--category <name-or-id>`** narrows to tasks in that category. Accepts multiple values
+  (comma-separated or by repeating the flag), OR'd, and is a server-side filter, so it
+  applies before `--limit`. A category name is only unique **within a project**, so it is
+  resolved per project like a status label: in a `--project`-less sweep a project defining
+  none of the names is skipped with a warning, while naming the project makes it an error.
+  A UUID is passed through as given. `taskshoot search --category ...` works the same way,
+  except that a name there matches that category in *every* project that defines it.
 - **`--mentioned <user>`** narrows to tasks whose description or a comment @-mentions that
   user. Give `me`, a handle name, a display name, or a user id. Mentions of groups the
   user belongs to are included.
