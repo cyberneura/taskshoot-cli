@@ -30,9 +30,15 @@ on:
 permissions:
   contents: read
 
+# One publish at a time, and no version dropped. `queue: max` holds up to 100
+# pending; the default `single` keeps one pending and cancels it when the next
+# arrives, which with three tags in quick succession would leave the middle
+# version released on GitHub and absent from crates.io. `queue: max` may not be
+# paired with `cancel-in-progress: true`.
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   publish:
