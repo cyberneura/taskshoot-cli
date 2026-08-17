@@ -8,10 +8,13 @@ cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell", "homebrew"]
-# The Homebrew tap repository to publish the formula to
-tap = "cyberneura/homebrew-tap"
-# Publish jobs to run in CI
-publish-jobs = ["homebrew"]
+installers = ["shell", "powershell"]
+# Publish jobs to run in CI. None.
+# The formula is not pushed from here: cyberneura/homebrew-tap updates itself
+# hourly from the latest release, so a token that can write to the tap does not
+# have to be handed to this repository. crates.io is published by
+# .github/workflows/publish-crates.yml, which runs from the same tag as this
+# workflow and waits for the release it produces.
+publish-jobs = []
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]

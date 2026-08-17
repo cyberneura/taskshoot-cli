@@ -1,0 +1,307 @@
+name: Publish to crates.io
+
+# Runs from the tag that tag-on-version-change.yml puts on, alongside the
+# cargo-dist workflow that builds the release -- and waits for that release
+# before publishing anything. crates.io cannot be walked back, so a version goes
+# there only once the build that produced its binaries has succeeded.
+#
+# This used to be the last step of ./release.sh, run from a laptop. Releases now
+# start from a version change on main, and a step that only happens when someone
+# remembers to run a script is not part of that.
+#
+# It is a workflow of its own rather than a cargo-dist custom publish job: dist
+# generates the calling job with `permissions: {id-token: write, packages:
+# write}`, and naming any permission sets the rest to none. A called workflow
+# cannot ask for more than its caller was given, so `contents: read` here would
+# be worth nothing and the checkout would have no rights to the repository.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  # For a version whose publish failed for a reason since fixed. The index check
+  # below applies either way, so this cannot publish anything twice.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to publish (v1.2.3)
+        required: true
+        type: string
+      announce:
+        description: >-
+          Announce even if the version is already on crates.io. For a run that
+          published and then failed before it could say so.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# One publish at a time, and no version dropped. `queue: max` holds up to 100
+# pending; the default `single` keeps one pending and cancels it when the next
+# arrives, which with three tags in quick succession would leave the middle
+# version released on GitHub and absent from crates.io. `queue: max` may not be
+# paired with `cancel-in-progress: true`.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Read version
+        id: version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # The version comes from the manifest, and the tag has to agree with
+          # it: publishing what the tag says while building what the manifest
+          # says would put two different things out under one version.
+          VERSION=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "taskshoot") | .version')
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not read the version out of Cargo.toml"
+            exit 1
+          fi
+          if [ "$TAG" != "v${VERSION}" ]; then
+            echo "::error::${TAG} does not carry version ${VERSION}"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Tags normally come from tag-on-version-change.yml, which only tags main.
+      # One pushed by hand does not, and this workflow answers to any tag that
+      # looks like a version -- so a bumped feature commit could be published,
+      # and crates.io cannot be taken back. release.sh required main before it
+      # published; this is where that requirement lives now.
+      #
+      # `behind` means the tagged commit is an ancestor of main, and `identical`
+      # means it is main. `ahead` and `diverged` are commits main does not have.
+      #
+      # The commit comes from the checkout, not from github.sha: on a dispatch
+      # the latter is the commit of the ref the run was started from -- usually
+      # main -- while what gets published is inputs.tag. Comparing github.sha
+      # would check main against itself and pass whatever tag was named.
+      - name: Refuse to publish a commit that is not on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "publishing from ${SHA}"
+          state=$(gh api "repos/${GH_REPO}/compare/main...${SHA}" --jq .status) || {
+            echo "::error::could not compare ${SHA} with main. Not guessing."
+            exit 1
+          }
+          case "$state" in
+            identical|behind)
+              echo "${SHA} is on main (${state})."
+              ;;
+            *)
+              echo "::error::${SHA} is not on main (${state}); refusing to publish it."
+              exit 1
+              ;;
+          esac
+
+      # The GitHub Release is built by release.yml from this same tag. Waiting
+      # for it is what keeps a crates.io version -- which can never be taken
+      # back -- from going out for a build that failed.
+      - name: Wait for the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # 60 tries, 30s apart: 30 minutes. The dist build of five targets
+          # takes something under half of that.
+          for _ in $(seq 60); do
+            status=$(gh api "repos/${GH_REPO}/releases/tags/v${VERSION}" \
+              --silent --include 2>/dev/null | head -n 1 | awk '{print $2}' || true)
+            case "$status" in
+              200)
+                echo "v${VERSION} is released; publishing."
+                exit 0
+                ;;
+              # A draft has no tag for this endpoint to find, so 404 is both
+              # "not built yet" and "still a draft". Either way: keep waiting.
+              404) ;;
+              *)
+                echo "::notice::releases API answered ${status:-nothing}; trying again"
+                ;;
+            esac
+            sleep 30
+          done
+          echo "::error::v${VERSION} was not released within 30 minutes. Nothing published; re-run this workflow once the release is out."
+          exit 1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          CRATE: taskshoot
+          ANNOUNCE: ${{ inputs.announce }}
+        run: |
+          set -o pipefail
+
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. Add it with 'gh secret set CARGO_REGISTRY_TOKEN'."
+            exit 1
+          fi
+
+          # What cargo resolves against is the sparse index, not the web API, and
+          # the two do not update together. Asking the index is therefore the
+          # only answer that means "this version is installable".
+          #
+          # The path nests by name length, and the short cases are not the shape
+          # of the common one. Getting it wrong yields a 404, which reads as "not
+          # published" and would try to publish a version that is already out.
+          index_url() {
+            case ${#1} in
+              1) path="1/$1" ;;
+              2) path="2/$1" ;;
+              3) path="3/${1:0:1}/$1" ;;
+              *) path="${1:0:2}/${1:2:2}/$1" ;;
+            esac
+            printf 'https://index.crates.io/%s' "$path"
+          }
+
+          # Only 200 and 404 are answers. Anything else -- a rate limit, an
+          # outage, a broken connection -- is not evidence of absence.
+          indexed() {
+            body=$(mktemp)
+            status=$(curl -s -o "$body" -w '%{http_code}' "$(index_url "$CRATE")" || echo 000)
+            answer="unknown:$status"
+            case "$status" in
+              404) answer="no" ;;
+              200)
+                # The index is one json object per line, one per version. A 200
+                # whose body will not parse is a broken answer, not a "no".
+                if ! jq -e . < "$body" >/dev/null 2>&1; then
+                  answer="unknown:unparsable"
+                elif jq -e --arg v "$VERSION" 'select(.vers == $v)' < "$body" >/dev/null; then
+                  answer="yes"
+                else
+                  answer="no"
+                fi
+                ;;
+            esac
+            rm -f "$body"
+            echo "$answer"
+          }
+
+          case "$(indexed)" in
+            yes)
+              echo "${CRATE} ${VERSION} is already on crates.io; nothing to publish."
+              # A run can publish and then fail before it says so -- the index
+              # can take longer to catch up than this waits. Rerunning it lands
+              # here, with nothing left to do and the announcement still unsent,
+              # so the dispatch can ask for it. Not automatic: every rerun would
+              # otherwise announce the same version again.
+              echo "published=${ANNOUNCE:-false}" >> "$GITHUB_ENV"
+              exit 0
+              ;;
+            no) ;;
+            *)
+              echo "::error::could not tell whether ${CRATE} ${VERSION} is published. Not guessing."
+              exit 1
+              ;;
+          esac
+
+          # A failure here is not proof that nothing was published: the registry
+          # can take the crate and the response still be lost. The index is the
+          # only thing that settles it.
+          if ! cargo publish --locked; then
+            for _ in $(seq 12); do
+              sleep 10
+              case "$(indexed)" in
+                yes)
+                  echo "publishing ${CRATE} ${VERSION} reported a failure, but it is in the index"
+                  echo "published=true" >> "$GITHUB_ENV"
+                  exit 0
+                  ;;
+                no) ;;
+                *)
+                  echo "::error::publishing ${CRATE} ${VERSION} failed and the index cannot be read."
+                  exit 1
+                  ;;
+              esac
+            done
+            echo "::error::publishing ${CRATE} ${VERSION} failed and it is not in the index"
+            exit 1
+          fi
+
+          # `cargo install taskshoot` cannot find it until the index has caught
+          # up, so the announcement below waits for that rather than for the
+          # upload.
+          for _ in $(seq 30); do
+            sleep 10
+            case "$(indexed)" in
+              yes)
+                echo "published=true" >> "$GITHUB_ENV"
+                exit 0
+                ;;
+              no) ;;
+              *)
+                echo "::error::${CRATE} ${VERSION} was published, but the index could not be read."
+                exit 1
+                ;;
+            esac
+          done
+          echo "::error::${CRATE} ${VERSION} never reached the index"
+          exit 1
+
+      # After the publish, never before it: an announcement of a version nobody
+      # can install yet sends people to fetch something that is not there.
+      # Neither of these may fail the run -- the crate is out either way, and a
+      # webhook that is down is not a reason to look at a red release.
+      - name: Say so
+        if: env.published == 'true'
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALEXA_WEBHOOK_TOKEN: ${{ secrets.ALEXA_WEBHOOK_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Each webhook swallows its own failure. The step's shell runs with
+          # -e, so an unreachable Slack would end the step before Alexa is
+          # asked -- and continue-on-error only keeps that from failing the
+          # run, it does not carry on through the rest of the script.
+          #
+          # --fail so that an HTTP error counts as one: without it curl exits 0
+          # on a 404 from a revoked webhook, and the notice below never prints --
+          # leaving no sign that the announcement was lost and that a dispatch
+          # with `announce` would send it.
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            jq -n --arg text "taskshoot ${VERSION} is on crates.io. <${RUN_URL}|Detail>" \
+              '{channel: "C06TSP3NVJL", username: "crates.io", icon_emoji: ":package:", text: $text}' \
+              | curl -sS --fail -X POST -H 'Content-Type: application/json' -d @- "$SLACK_WEBHOOK_URL" \
+              || echo "::notice::announcing to Slack failed"
+          else
+            echo "::notice::SLACK_WEBHOOK_URL is not set; not announcing to Slack"
+          fi
+
+          if [ -n "$ALEXA_WEBHOOK_TOKEN" ]; then
+            jq -n --arg text "Taskshoot CLI ${VERSION} is on crates dot io." \
+              '{device: "書斎 Echo Dot", text: $text}' \
+              | curl -sS --fail -X POST -H 'Content-Type: application/json' \
+                  -H "Authorization: Bearer $ALEXA_WEBHOOK_TOKEN" \
+                  -d @- "https://alexa-webhook.ytyng.com/speak" \
+              || echo "::notice::speaking to Alexa failed"
+          else
+            echo "::notice::ALEXA_WEBHOOK_TOKEN is not set; not speaking"
+          fi
