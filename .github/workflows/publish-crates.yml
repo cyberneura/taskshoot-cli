@@ -1,33 +1,100 @@
 name: Publish to crates.io
 
-# Called by release.yml, which cargo-dist generates: `publish-jobs` in
-# dist-workspace.toml names this file, and dist wires it in after the GitHub
-# Release is out. That order is the point -- crates.io cannot be walked back,
-# so it goes last, once the release it belongs to exists.
+# Runs from the tag that tag-on-version-change.yml puts on, alongside the
+# cargo-dist workflow that builds the release -- and waits for that release
+# before publishing anything. crates.io cannot be walked back, so a version goes
+# there only once the build that produced its binaries has succeeded.
 #
 # This used to be the last step of ./release.sh, run from a laptop. Releases now
 # start from a version change on main, and a step that only happens when someone
 # remembers to run a script is not part of that.
+#
+# It is a workflow of its own rather than a cargo-dist custom publish job: dist
+# generates the calling job with `permissions: {id-token: write, packages:
+# write}`, and naming any permission sets the rest to none. A called workflow
+# cannot ask for more than its caller was given, so `contents: read` here would
+# be worth nothing and the checkout would have no rights to the repository.
 on:
-  workflow_call:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  # For a version whose publish failed for a reason since fixed. The index check
+  # below applies either way, so this cannot publish anything twice.
+  workflow_dispatch:
     inputs:
-      plan:
-        description: The dist plan for this release
+      tag:
+        description: The tag to publish (v1.2.3)
         required: true
         type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
+
+      - name: Read version
+        id: version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # The version comes from the manifest, and the tag has to agree with
+          # it: publishing what the tag says while building what the manifest
+          # says would put two different things out under one version.
+          VERSION=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "taskshoot") | .version')
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not read the version out of Cargo.toml"
+            exit 1
+          fi
+          if [ "$TAG" != "v${VERSION}" ]; then
+            echo "::error::${TAG} does not carry version ${VERSION}"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # The GitHub Release is built by release.yml from this same tag. Waiting
+      # for it is what keeps a crates.io version -- which can never be taken
+      # back -- from going out for a build that failed.
+      - name: Wait for the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # 60 tries, 30s apart: 30 minutes. The dist build of five targets
+          # takes something under half of that.
+          for _ in $(seq 60); do
+            status=$(gh api "repos/${GH_REPO}/releases/tags/v${VERSION}" \
+              --silent --include 2>/dev/null | head -n 1 | awk '{print $2}' || true)
+            case "$status" in
+              200)
+                echo "v${VERSION} is released; publishing."
+                exit 0
+                ;;
+              # A draft has no tag for this endpoint to find, so 404 is both
+              # "not built yet" and "still a draft". Either way: keep waiting.
+              404) ;;
+              *)
+                echo "::notice::releases API answered ${status:-nothing}; trying again"
+                ;;
+            esac
+            sleep 30
+          done
+          echo "::error::v${VERSION} was not released within 30 minutes. Nothing published; re-run this workflow once the release is out."
+          exit 1
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
@@ -37,7 +104,7 @@ jobs:
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          PLAN: ${{ inputs.plan }}
+          VERSION: ${{ steps.version.outputs.version }}
           CRATE: taskshoot
         run: |
           set -o pipefail
@@ -46,16 +113,6 @@ jobs:
             echo "::error::CARGO_REGISTRY_TOKEN is not set. Add it with 'gh secret set CARGO_REGISTRY_TOKEN'."
             exit 1
           fi
-
-          # The version comes from the plan rather than from the checkout, so
-          # that what is published is the version this release announced.
-          VERSION=$(jq -r '.releases[0].app_version // empty' <<< "$PLAN")
-          if [ -z "$VERSION" ]; then
-            echo "::error::could not read the version out of the dist plan"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_ENV"
-          echo "Publishing ${CRATE} ${VERSION}"
 
           # What cargo resolves against is the sparse index, not the web API, and
           # the two do not update together. Asking the index is therefore the
@@ -83,8 +140,8 @@ jobs:
             case "$status" in
               404) answer="no" ;;
               200)
-                # A 200 whose body will not parse is a broken answer, not a "no".
-                # The index is one json object per line, one per version.
+                # The index is one json object per line, one per version. A 200
+                # whose body will not parse is a broken answer, not a "no".
                 if ! jq -e . < "$body" >/dev/null 2>&1; then
                   answer="unknown:unparsable"
                 elif jq -e --arg v "$VERSION" 'select(.vers == $v)' < "$body" >/dev/null; then
@@ -164,7 +221,7 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           ALEXA_WEBHOOK_TOKEN: ${{ secrets.ALEXA_WEBHOOK_TOKEN }}
-          VERSION: ${{ env.version }}
+          VERSION: ${{ steps.version.outputs.version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
