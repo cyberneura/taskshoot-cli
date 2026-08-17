@@ -26,6 +26,13 @@ on:
         description: The tag to publish (v1.2.3)
         required: true
         type: string
+      announce:
+        description: >-
+          Announce even if the version is already on crates.io. For a run that
+          published and then failed before it could say so.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -146,6 +153,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
           CRATE: taskshoot
+          ANNOUNCE: ${{ inputs.announce }}
         run: |
           set -o pipefail
 
@@ -197,8 +205,13 @@ jobs:
 
           case "$(indexed)" in
             yes)
-              echo "${CRATE} ${VERSION} is already on crates.io; nothing to do."
-              echo "published=false" >> "$GITHUB_ENV"
+              echo "${CRATE} ${VERSION} is already on crates.io; nothing to publish."
+              # A run can publish and then fail before it says so -- the index
+              # can take longer to catch up than this waits. Rerunning it lands
+              # here, with nothing left to do and the announcement still unsent,
+              # so the dispatch can ask for it. Not automatic: every rerun would
+              # otherwise announce the same version again.
+              echo "published=${ANNOUNCE:-false}" >> "$GITHUB_ENV"
               exit 0
               ;;
             no) ;;
