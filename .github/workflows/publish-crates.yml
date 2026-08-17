@@ -71,6 +71,34 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # Tags normally come from tag-on-version-change.yml, which only tags main.
+      # One pushed by hand does not, and this workflow answers to any tag that
+      # looks like a version -- so a bumped feature commit could be published,
+      # and crates.io cannot be taken back. release.sh required main before it
+      # published; this is where that requirement lives now.
+      #
+      # `behind` means the tagged commit is an ancestor of main, and `identical`
+      # means it is main. `ahead` and `diverged` are commits main does not have.
+      - name: Refuse to publish a commit that is not on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          state=$(gh api "repos/${GH_REPO}/compare/main...${SHA}" --jq .status) || {
+            echo "::error::could not compare ${SHA} with main. Not guessing."
+            exit 1
+          }
+          case "$state" in
+            identical|behind)
+              echo "${SHA} is on main (${state})."
+              ;;
+            *)
+              echo "::error::${SHA} is not on main (${state}); refusing to publish it."
+              exit 1
+              ;;
+          esac
+
       # The GitHub Release is built by release.yml from this same tag. Waiting
       # for it is what keeps a crates.io version -- which can never be taken
       # back -- from going out for a build that failed.
