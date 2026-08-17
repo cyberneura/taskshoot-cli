@@ -39,9 +39,12 @@ concurrency:
   queue: max
 
 jobs:
-  tag:
+  plan:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
     steps:
       # A dispatch names its own ref, and a branch carrying an unreleased
       # version would otherwise be tagged wherever it sits. Releases come from
@@ -110,16 +113,85 @@ jobs:
           echo "tag=true" >> "$GITHUB_OUTPUT"
           echo "Tagging v${VERSION}"
 
+  # The checks that used to run on a laptop before the tag was pushed. A tag
+  # cannot be taken back once release.yml has built from it, and the crates.io
+  # version that follows cannot be taken back at all, so they run here -- but
+  # only when there is something to release, so an ordinary push to main does
+  # not pay for them.
+  check:
+    needs: plan
+    if: needs.plan.outputs.tag == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache Rust (cargo + target)
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release
+
+      # A binary that reports a different version than the manifest declares
+      # would ship under the wrong name. ./release.sh checks this too, and this
+      # is the copy that cannot be skipped.
+      - name: Check the built version
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          ./target/release/taskshoot --version | grep -qx "taskshoot ${VERSION}"
+
+      # A stale plugin manifest would ship a marketplace entry claiming the
+      # previous release's contents.
+      - name: Check the plugin manifests
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          for spec in \
+            ".claude-plugin/marketplace.json|.plugins[] | select(.name == \"taskshoot\") | .version" \
+            ".claude-plugin/plugin.json|.version"; do
+            manifest=${spec%%|*}
+            filter=${spec#*|}
+            found=$(jq -r "$filter // empty" "$manifest")
+            if [ "$found" != "$VERSION" ]; then
+              echo "::error::${manifest} declares '${found:-nothing}', but Cargo.toml declares ${VERSION}"
+              exit 1
+            fi
+          done
+
+  tag:
+    needs: [plan, check]
+    if: needs.plan.outputs.tag == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
       # The tag is what starts release.yml, so it cannot be pushed with
       # GITHUB_TOKEN: GitHub does not start workflows from what that token does,
       # which is how it keeps a workflow from setting itself off forever. A PAT
       # has no such rule, and RELEASE_TAG_TOKEN is one held for this.
       - name: Create the tag
-        if: steps.decide.outputs.tag == 'true'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.plan.outputs.version }}
           COMMIT: ${{ github.sha }}
         run: |
           if [ -z "$GH_TOKEN" ]; then

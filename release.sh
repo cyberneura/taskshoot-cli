@@ -8,9 +8,11 @@
 # Release, .github/workflows/publish-crates.yml publishes to crates.io, and
 # cyberneura/homebrew-tap picks the new release up within the hour.
 #
-# What is left here is the part CI cannot do for you: catching a version that
-# should not go out *before* it is merged. Run it on the version bump branch --
-# nothing it does can be undone, because it changes nothing.
+# The same checks run in CI, in the `check` job of tag-on-version-change.yml,
+# before the tag is created -- that is the copy that cannot be skipped. This one
+# is for running them on the bump branch, where a failure costs a fix rather
+# than a burnt version number. Nothing it does can be undone, because it changes
+# nothing.
 #
 #   ./release.sh                   # run every check
 #   ./release.sh --skip-crates-io  # skip the slow `cargo publish --dry-run`

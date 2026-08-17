@@ -230,10 +230,15 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # Each webhook swallows its own failure. The step's shell runs with
+          # -e, so an unreachable Slack would end the step before Alexa is
+          # asked -- and continue-on-error only keeps that from failing the
+          # run, it does not carry on through the rest of the script.
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
             jq -n --arg text "taskshoot ${VERSION} is on crates.io. <${RUN_URL}|Detail>" \
               '{channel: "C06TSP3NVJL", username: "crates.io", icon_emoji: ":package:", text: $text}' \
-              | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$SLACK_WEBHOOK_URL"
+              | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$SLACK_WEBHOOK_URL" \
+              || echo "::notice::announcing to Slack failed"
           else
             echo "::notice::SLACK_WEBHOOK_URL is not set; not announcing to Slack"
           fi
@@ -243,7 +248,8 @@ jobs:
               '{device: "書斎 Echo Dot", text: $text}' \
               | curl -sS -X POST -H 'Content-Type: application/json' \
                   -H "Authorization: Bearer $ALEXA_WEBHOOK_TOKEN" \
-                  -d @- "https://alexa-webhook.ytyng.com/speak"
+                  -d @- "https://alexa-webhook.ytyng.com/speak" \
+              || echo "::notice::speaking to Alexa failed"
           else
             echo "::notice::ALEXA_WEBHOOK_TOKEN is not set; not speaking"
           fi
