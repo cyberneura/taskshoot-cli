@@ -1,32 +1,28 @@
 #!/usr/bin/env bash
 #
-# Release the version currently declared in Cargo.toml.
+# Check that the version currently declared in Cargo.toml is fit to release.
 #
-# Pushing the tag is what starts the release: .github/workflows/release.yml
-# reacts to it, builds every target with cargo-dist, creates the GitHub Release
-# and updates the Homebrew tap. This script runs the checks that are awkward to
-# undo afterwards, then pushes the tag and publishes to crates.io.
+# The release itself is not started from here any more. Changing the version on
+# main is what starts it: .github/workflows/tag-on-version-change.yml puts the
+# tag on, the cargo-dist workflow builds every target and creates the GitHub
+# Release, .github/workflows/publish-crates.yml publishes to crates.io, and
+# cyberneura/homebrew-tap picks the new release up within the hour.
 #
-# To release a new version, edit the version in Cargo.toml (and keep the plugin
-# manifests in step), commit that on main, then run this.
+# What is left here is the part CI cannot do for you: catching a version that
+# should not go out *before* it is merged. Run it on the version bump branch --
+# nothing it does can be undone, because it changes nothing.
 #
-#   ./release.sh              # release the version in Cargo.toml
-#   ./release.sh --dry-run    # run every check, change nothing
-#   ./release.sh --yes        # skip the confirmation prompt
-#   ./release.sh --skip-crates-io
+#   ./release.sh                   # run every check
+#   ./release.sh --skip-crates-io  # skip the slow `cargo publish --dry-run`
 
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-DRY_RUN=false
-ASSUME_YES=false
 SKIP_CRATES_IO=false
 
 for arg in "$@"; do
   case "$arg" in
-    --dry-run) DRY_RUN=true ;;
-    -y|--yes) ASSUME_YES=true ;;
     --skip-crates-io) SKIP_CRATES_IO=true ;;
     -h|--help) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -43,7 +39,7 @@ command -v jq >/dev/null || fail "jq is required"
 # appears elsewhere in the file cannot be picked up by mistake.
 VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
 TAG="v${VERSION}"
-step "Releasing ${TAG}"
+step "Checking ${TAG}"
 
 # Every manifest that carries this version has to agree. A stale plugin manifest
 # would ship a marketplace entry claiming the previous release's contents. Each
@@ -62,24 +58,23 @@ lock_version=$(cargo metadata --format-version 1 --locked >/dev/null 2>&1 && ech
 echo "Cargo.toml, both plugin manifests and Cargo.lock all agree on ${VERSION}"
 
 # --- repository state ------------------------------------------------------
+# The branch is not checked: this runs on the version bump before it is merged,
+# which is the point at which the answer is still worth having. What is checked
+# is that the version is free, since merging one that is not leaves main
+# carrying a version that will never be released.
 step "Checking the repository"
-branch=$(git rev-parse --abbrev-ref HEAD)
-[ "$branch" = main ] || fail "on branch '$branch'; releases are cut from main"
 [ -z "$(git status --porcelain)" ] || fail "the working tree has uncommitted changes"
 
-git fetch --quiet origin main
-[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] ||
-  fail "main and origin/main differ; pull or push first"
-
+git fetch --quiet origin
 git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null &&
   fail "tag ${TAG} already exists locally"
 [ -z "$(git ls-remote --tags origin "refs/tags/${TAG}")" ] ||
-  fail "tag ${TAG} already exists on origin"
-echo "main is clean and in sync, and ${TAG} is unused"
+  fail "tag ${TAG} already exists on origin; bump the version"
+echo "the working tree is clean and ${TAG} is unused"
 
 # --- checks ----------------------------------------------------------------
-# These run before anything is published because a pushed tag and a crates.io
-# version are both awkward to walk back.
+# The same checks CI would run, run here because a release that fails after the
+# tag is on cannot be retried under the same version.
 step "Running checks"
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
@@ -93,37 +88,14 @@ if [ "$SKIP_CRATES_IO" = false ]; then
   cargo publish --dry-run
 fi
 
-if [ "$DRY_RUN" = true ]; then
-  step "Dry run complete — nothing was published"
-  exit 0
-fi
-
-# --- confirm ---------------------------------------------------------------
-if [ "$ASSUME_YES" = false ]; then
-  printf '\nPush %s and publish %s? [y/N] ' "$TAG" \
-    "$([ "$SKIP_CRATES_IO" = true ] && echo "to GitHub only" || echo "to GitHub and crates.io")"
-  read -r reply
-  case "$reply" in [yY]*) ;; *) fail "aborted" ;; esac
-fi
-
-# --- release ---------------------------------------------------------------
-# The tag goes first: a tag and a GitHub release can both be deleted, whereas a
-# crates.io version can never be republished. Leave the irreversible step last,
-# once everything else has succeeded.
-step "Pushing ${TAG}"
-git tag -a "${TAG}" -m "${TAG}"
-git push origin "${TAG}"
-
-if [ "$SKIP_CRATES_IO" = false ]; then
-  step "Publishing to crates.io"
-  cargo publish
-fi
-
-step "Done"
+step "Ready"
 cat <<EOF
-Workflow  https://github.com/cyberneura/taskshoot-cli/actions
-Release   https://github.com/cyberneura/taskshoot-cli/releases/tag/${TAG}
+${TAG} is fit to release. Merging this version into main is what releases it:
 
-The GitHub Release appears once the workflow finishes; it builds the binaries,
-the installers and the Homebrew formula.
+  tag-on-version-change.yml  puts v${VERSION} on the merge commit
+  release.yml (cargo-dist)   builds every target and creates the GitHub Release
+  publish-crates.yml         publishes ${VERSION} to crates.io
+  cyberneura/homebrew-tap    picks the release up within the hour
+
+Workflows  https://github.com/cyberneura/taskshoot-cli/actions
 EOF

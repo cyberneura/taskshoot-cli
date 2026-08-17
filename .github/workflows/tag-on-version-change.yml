@@ -1,0 +1,132 @@
+name: Tag on version change
+
+# Releases follow the version in Cargo.toml: change it on main and the release
+# happens. This workflow only puts the tag on; the release itself is cut by
+# release.yml, which cargo-dist generates and which starts from that tag.
+#
+# What decides whether to tag is not the diff -- squash, rebase and a direct
+# push each leave a different one -- but whether that version has been released
+# already. Asking that makes the workflow idempotent: run it again over a
+# released version and nothing happens.
+#
+# Every push to main is looked at, with no path filter. A filter on Cargo.toml
+# reads the diff, and the diff is exactly what a squash, a rebase or a direct
+# push leave differently -- a version bump that arrived in an unexpected shape
+# would go unreleased and unremarked. The check below costs a checkout and one
+# API call instead.
+#
+# A build that failed leaves the tag behind, and a tag cannot be pushed twice.
+# The fix is not shipped by pushing it: re-run the tagged release run from the
+# Actions tab if the tagged commit is sound, and bump the version if it is not.
+# This workflow says so when it finds that state rather than trying either.
+on:
+  push:
+    branches: [main]
+  # For a version that was merged while this workflow, or the API it asks, was
+  # having a bad day. The same check applies, so this cannot retag anything.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialised so that two pushes in quick succession cannot look at the same
+# version at once and both decide to tag it. `queue: max` holds up to 100
+# pending rather than the default `single`, which keeps one and cancels the
+# rest; it may not be paired with `cancel-in-progress: true`.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A dispatch names its own ref, and a branch carrying an unreleased
+      # version would otherwise be tagged wherever it sits. Releases come from
+      # main; a push cannot be anything else, but a dispatch can.
+      - name: Refuse to release from anywhere but main
+        if: github.ref != 'refs/heads/main'
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::releases come from main, and this run is on ${REF}"
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "taskshoot") | .version')
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not read the version out of Cargo.toml"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether this version still needs a tag
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Only 404 counts as "not released". A rate limit or an outage read
+          # that way would tag a version that is already out -- and a second tag
+          # cannot be put on the same name, so the run would fail on the push
+          # instead of quietly doing the wrong thing. It is still not a question
+          # to guess at.
+          status=$(gh api "repos/${GH_REPO}/releases/tags/v${VERSION}" \
+            --silent --include 2>/dev/null | head -n 1 | awk '{print $2}' || true)
+          case "$status" in
+            404) ;;
+            200)
+              echo "tag=false" >> "$GITHUB_OUTPUT"
+              echo "v${VERSION} is already released; nothing to do."
+              exit 0
+              ;;
+            *)
+              echo "::error::could not tell whether v${VERSION} exists (HTTP ${status:-none}). Not guessing."
+              exit 1
+              ;;
+          esac
+
+          # No release, but the tag may still be there: release.yml ran and
+          # failed. Pushing the tag again is not possible, and moving it would
+          # point a released name at a different commit, so this stops and says
+          # what to do instead.
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "tag=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::v${VERSION} is tagged but not released -- the release run failed. Re-run it from the Actions tab, or bump the version."
+            exit 0
+          fi
+
+          echo "tag=true" >> "$GITHUB_OUTPUT"
+          echo "Tagging v${VERSION}"
+
+      # The tag is what starts release.yml, so it cannot be pushed with
+      # GITHUB_TOKEN: GitHub does not start workflows from what that token does,
+      # which is how it keeps a workflow from setting itself off forever. A PAT
+      # has no such rule, and RELEASE_TAG_TOKEN is one held for this.
+      - name: Create the tag
+        if: steps.decide.outputs.tag == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASE_TAG_TOKEN is not set. Add it with 'gh secret set RELEASE_TAG_TOKEN'; GITHUB_TOKEN cannot be used here because a tag it pushes starts nothing."
+            exit 1
+          fi
+          gh api -X POST "repos/${GH_REPO}/git/refs" \
+            -f "ref=refs/tags/v${VERSION}" \
+            -f "sha=${COMMIT}"
+          echo "Pushed v${VERSION} at ${COMMIT}; release.yml takes it from here."

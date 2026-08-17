@@ -1,0 +1,186 @@
+name: Publish to crates.io
+
+# Called by release.yml, which cargo-dist generates: `publish-jobs` in
+# dist-workspace.toml names this file, and dist wires it in after the GitHub
+# Release is out. That order is the point -- crates.io cannot be walked back,
+# so it goes last, once the release it belongs to exists.
+#
+# This used to be the last step of ./release.sh, run from a laptop. Releases now
+# start from a version change on main, and a step that only happens when someone
+# remembers to run a script is not part of that.
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: The dist plan for this release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          PLAN: ${{ inputs.plan }}
+          CRATE: taskshoot
+        run: |
+          set -o pipefail
+
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. Add it with 'gh secret set CARGO_REGISTRY_TOKEN'."
+            exit 1
+          fi
+
+          # The version comes from the plan rather than from the checkout, so
+          # that what is published is the version this release announced.
+          VERSION=$(jq -r '.releases[0].app_version // empty' <<< "$PLAN")
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not read the version out of the dist plan"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_ENV"
+          echo "Publishing ${CRATE} ${VERSION}"
+
+          # What cargo resolves against is the sparse index, not the web API, and
+          # the two do not update together. Asking the index is therefore the
+          # only answer that means "this version is installable".
+          #
+          # The path nests by name length, and the short cases are not the shape
+          # of the common one. Getting it wrong yields a 404, which reads as "not
+          # published" and would try to publish a version that is already out.
+          index_url() {
+            case ${#1} in
+              1) path="1/$1" ;;
+              2) path="2/$1" ;;
+              3) path="3/${1:0:1}/$1" ;;
+              *) path="${1:0:2}/${1:2:2}/$1" ;;
+            esac
+            printf 'https://index.crates.io/%s' "$path"
+          }
+
+          # Only 200 and 404 are answers. Anything else -- a rate limit, an
+          # outage, a broken connection -- is not evidence of absence.
+          indexed() {
+            body=$(mktemp)
+            status=$(curl -s -o "$body" -w '%{http_code}' "$(index_url "$CRATE")" || echo 000)
+            answer="unknown:$status"
+            case "$status" in
+              404) answer="no" ;;
+              200)
+                # A 200 whose body will not parse is a broken answer, not a "no".
+                # The index is one json object per line, one per version.
+                if ! jq -e . < "$body" >/dev/null 2>&1; then
+                  answer="unknown:unparsable"
+                elif jq -e --arg v "$VERSION" 'select(.vers == $v)' < "$body" >/dev/null; then
+                  answer="yes"
+                else
+                  answer="no"
+                fi
+                ;;
+            esac
+            rm -f "$body"
+            echo "$answer"
+          }
+
+          case "$(indexed)" in
+            yes)
+              echo "${CRATE} ${VERSION} is already on crates.io; nothing to do."
+              echo "published=false" >> "$GITHUB_ENV"
+              exit 0
+              ;;
+            no) ;;
+            *)
+              echo "::error::could not tell whether ${CRATE} ${VERSION} is published. Not guessing."
+              exit 1
+              ;;
+          esac
+
+          # A failure here is not proof that nothing was published: the registry
+          # can take the crate and the response still be lost. The index is the
+          # only thing that settles it.
+          if ! cargo publish --locked; then
+            for _ in $(seq 12); do
+              sleep 10
+              case "$(indexed)" in
+                yes)
+                  echo "publishing ${CRATE} ${VERSION} reported a failure, but it is in the index"
+                  echo "published=true" >> "$GITHUB_ENV"
+                  exit 0
+                  ;;
+                no) ;;
+                *)
+                  echo "::error::publishing ${CRATE} ${VERSION} failed and the index cannot be read."
+                  exit 1
+                  ;;
+              esac
+            done
+            echo "::error::publishing ${CRATE} ${VERSION} failed and it is not in the index"
+            exit 1
+          fi
+
+          # `cargo install taskshoot` cannot find it until the index has caught
+          # up, so the announcement below waits for that rather than for the
+          # upload.
+          for _ in $(seq 30); do
+            sleep 10
+            case "$(indexed)" in
+              yes)
+                echo "published=true" >> "$GITHUB_ENV"
+                exit 0
+                ;;
+              no) ;;
+              *)
+                echo "::error::${CRATE} ${VERSION} was published, but the index could not be read."
+                exit 1
+                ;;
+            esac
+          done
+          echo "::error::${CRATE} ${VERSION} never reached the index"
+          exit 1
+
+      # After the publish, never before it: an announcement of a version nobody
+      # can install yet sends people to fetch something that is not there.
+      # Neither of these may fail the run -- the crate is out either way, and a
+      # webhook that is down is not a reason to look at a red release.
+      - name: Say so
+        if: env.published == 'true'
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ALEXA_WEBHOOK_TOKEN: ${{ secrets.ALEXA_WEBHOOK_TOKEN }}
+          VERSION: ${{ env.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            jq -n --arg text "taskshoot ${VERSION} is on crates.io. <${RUN_URL}|Detail>" \
+              '{channel: "C06TSP3NVJL", username: "crates.io", icon_emoji: ":package:", text: $text}' \
+              | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$SLACK_WEBHOOK_URL"
+          else
+            echo "::notice::SLACK_WEBHOOK_URL is not set; not announcing to Slack"
+          fi
+
+          if [ -n "$ALEXA_WEBHOOK_TOKEN" ]; then
+            jq -n --arg text "Taskshoot CLI ${VERSION} is on crates dot io." \
+              '{device: "書斎 Echo Dot", text: $text}' \
+              | curl -sS -X POST -H 'Content-Type: application/json' \
+                  -H "Authorization: Bearer $ALEXA_WEBHOOK_TOKEN" \
+                  -d @- "https://alexa-webhook.ytyng.com/speak"
+          else
+            echo "::notice::ALEXA_WEBHOOK_TOKEN is not set; not speaking"
+          fi
