@@ -141,14 +141,24 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      # --locked throughout: without it a stale Cargo.lock is quietly updated on
+      # the runner and every check passes against a lockfile the tag will not
+      # carry. publish-crates.yml publishes with --locked, so that version would
+      # be tagged, built, released -- and then fail to publish, with no way to
+      # redo the tag.
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
+
+      # The same packaging step publish-crates.yml will do for real, including
+      # the lockfile check that would otherwise only fail after the tag exists.
+      - name: Check the crates.io package
+        run: cargo publish --dry-run --locked
 
       # A binary that reports a different version than the manifest declares
       # would ship under the wrong name. ./release.sh checks this too, and this
