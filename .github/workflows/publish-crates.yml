@@ -79,12 +79,18 @@ jobs:
       #
       # `behind` means the tagged commit is an ancestor of main, and `identical`
       # means it is main. `ahead` and `diverged` are commits main does not have.
+      #
+      # The commit comes from the checkout, not from github.sha: on a dispatch
+      # the latter is the commit of the ref the run was started from -- usually
+      # main -- while what gets published is inputs.tag. Comparing github.sha
+      # would check main against itself and pass whatever tag was named.
       - name: Refuse to publish a commit that is not on main
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
         run: |
+          SHA=$(git rev-parse HEAD)
+          echo "publishing from ${SHA}"
           state=$(gh api "repos/${GH_REPO}/compare/main...${SHA}" --jq .status) || {
             echo "::error::could not compare ${SHA} with main. Not guessing."
             exit 1
