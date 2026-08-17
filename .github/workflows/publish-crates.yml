@@ -281,10 +281,15 @@ jobs:
           # -e, so an unreachable Slack would end the step before Alexa is
           # asked -- and continue-on-error only keeps that from failing the
           # run, it does not carry on through the rest of the script.
+          #
+          # --fail so that an HTTP error counts as one: without it curl exits 0
+          # on a 404 from a revoked webhook, and the notice below never prints --
+          # leaving no sign that the announcement was lost and that a dispatch
+          # with `announce` would send it.
           if [ -n "$SLACK_WEBHOOK_URL" ]; then
             jq -n --arg text "taskshoot ${VERSION} is on crates.io. <${RUN_URL}|Detail>" \
               '{channel: "C06TSP3NVJL", username: "crates.io", icon_emoji: ":package:", text: $text}' \
-              | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$SLACK_WEBHOOK_URL" \
+              | curl -sS --fail -X POST -H 'Content-Type: application/json' -d @- "$SLACK_WEBHOOK_URL" \
               || echo "::notice::announcing to Slack failed"
           else
             echo "::notice::SLACK_WEBHOOK_URL is not set; not announcing to Slack"
@@ -293,7 +298,7 @@ jobs:
           if [ -n "$ALEXA_WEBHOOK_TOKEN" ]; then
             jq -n --arg text "Taskshoot CLI ${VERSION} is on crates dot io." \
               '{device: "書斎 Echo Dot", text: $text}' \
-              | curl -sS -X POST -H 'Content-Type: application/json' \
+              | curl -sS --fail -X POST -H 'Content-Type: application/json' \
                   -H "Authorization: Bearer $ALEXA_WEBHOOK_TOKEN" \
                   -d @- "https://alexa-webhook.ytyng.com/speak" \
               || echo "::notice::speaking to Alexa failed"
