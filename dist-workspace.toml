@@ -16,5 +16,10 @@ installers = ["shell", "powershell"]
 # .github/workflows/publish-crates.yml, which runs from the same tag as this
 # workflow and waits for the release it produces.
 publish-jobs = []
+# リリースの門番。ここに書いた job に build-local-artifacts が依存するので、
+# テストが赤ければアーティファクトが 1 つも作られず、リリースも出ない。
+# タグ push は ci.yml とは別 run なので、ci.yml では塞げない。
+# 実体は .github/workflows/test.yml (ci.yml も同じものを呼ぶ)。
+plan-jobs = ["./test"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]

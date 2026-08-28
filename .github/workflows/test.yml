@@ -1,0 +1,42 @@
+# fmt / clippy / test の実体。ci.yml (PR・main) と、cargo-dist が生成する
+# release.yml の custom-test (タグ push) の両方から呼ばれる。
+#
+# 再利用ワークフローにしているのは、リリースがタグ push という **ci.yml とは別の
+# run** で始まるため。ci.yml の結果は参照できず、タグは CI を通っていない
+# コミットにも打てる。同じ内容を 2 か所に書き写すとどちらかが古くなるので、
+# 実体はここ 1 か所に置く。
+name: Test
+
+on:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      # --locked を付けないと、Cargo.toml だけ変えて Cargo.lock を更新し忘れた
+      # PR でも runner 上で lock が黙って書き換わり、コミットに含まれていない
+      # 依存でテストが通ってしまう。
+      # tag-on-version-change.yml の check job と publish-crates.yml の
+      # cargo publish も --locked なので、そこで初めて落ちるより前に止める。
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked

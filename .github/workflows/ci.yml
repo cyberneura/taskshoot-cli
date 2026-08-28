@@ -1,0 +1,15 @@
+# PR と main の門番。このリポジトリには従来これが無く、cargo test が
+# どこでも走っていなかった (workflows はリリース関連の 3 本だけだった)。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    uses: ./.github/workflows/test.yml
