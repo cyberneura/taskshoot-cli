@@ -30,8 +30,13 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      # --locked throughout: without it を付けないと、Cargo.toml だけ変えて Cargo.lock を
+      # 更新し忘れた PR でも runner 上で lock が黙って書き換わり、コミットに
+      # 含まれていない依存でテストが通ってしまう。
+      # tag-on-version-change.yml の check job と publish-crates.yml の
+      # cargo publish も --locked なので、そこで初めて落ちるより前に止める。
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
