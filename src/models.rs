@@ -67,6 +67,9 @@ pub struct Task {
     pub reporter: Option<TaskAuthor>,
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Earliest date work may start (YYYY-MM-DD).
+    #[serde(default)]
+    pub start_available_date: Option<String>,
     #[serde(default)]
     pub due_date: Option<String>,
     pub tracked: bool,

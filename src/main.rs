@@ -343,7 +343,7 @@ enum TaskCmd {
         title: Option<String>,
         /// Create an untracked casual task from this message instead
         /// (tracked-task options cannot be combined)
-        #[arg(long, conflicts_with_all = ["title", "description", "status", "assignee", "owner", "priority", "due_date", "labels", "category"])]
+        #[arg(long, conflicts_with_all = ["title", "description", "status", "assignee", "owner", "priority", "start_available_date", "due_date", "labels", "category"])]
         content: Option<String>,
         #[arg(long)]
         description: Option<String>,
@@ -357,6 +357,10 @@ enum TaskCmd {
         owner: Option<String>,
         #[arg(long)]
         priority: Option<i64>,
+        /// Earliest date work may start. YYYY-MM-DD. The task list shows it and
+        /// deprioritizes the task until then
+        #[arg(long)]
+        start_available_date: Option<String>,
         /// YYYY-MM-DD
         #[arg(long)]
         due_date: Option<String>,
@@ -389,6 +393,9 @@ enum TaskCmd {
         description: Option<String>,
         #[arg(long)]
         priority: Option<i64>,
+        /// Earliest date work may start. YYYY-MM-DD. Empty string clears it
+        #[arg(long)]
+        start_available_date: Option<String>,
         /// YYYY-MM-DD
         #[arg(long)]
         due_date: Option<String>,
@@ -631,6 +638,7 @@ fn run() -> Result<()> {
                 assignee,
                 owner,
                 priority,
+                start_available_date,
                 due_date,
                 labels,
                 category,
@@ -645,6 +653,7 @@ fn run() -> Result<()> {
                     assignee,
                     owner,
                     priority,
+                    start_available_date,
                     due_date,
                     labels,
                     category,
@@ -661,6 +670,7 @@ fn run() -> Result<()> {
                 title,
                 description,
                 priority,
+                start_available_date,
                 due_date,
                 started_at,
                 completed_at,
@@ -679,6 +689,7 @@ fn run() -> Result<()> {
                     title,
                     description,
                     priority,
+                    start_available_date,
                     due_date,
                     started_at,
                     completed_at,
@@ -907,6 +918,73 @@ mod tests {
                 "expected --clear to conflict with {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn task_create_and_update_take_start_available_date() {
+        match activity_of(&[
+            "taskshoot",
+            "task",
+            "create",
+            "--project",
+            "DEV",
+            "--title",
+            "Bump fast-uri",
+            "--start-available-date",
+            "2026-09-06",
+        ]) {
+            TaskCmd::Create {
+                start_available_date,
+                ..
+            } => assert_eq!(start_available_date.as_deref(), Some("2026-09-06")),
+            _ => panic!("expected task create"),
+        }
+        match activity_of(&[
+            "taskshoot",
+            "task",
+            "update",
+            "DEV-1",
+            "--start-available-date",
+            "2026-09-06",
+        ]) {
+            TaskCmd::Update {
+                start_available_date,
+                ..
+            } => assert_eq!(start_available_date.as_deref(), Some("2026-09-06")),
+            _ => panic!("expected task update"),
+        }
+        // An empty string clears the field server-side, so it has to survive parsing.
+        match activity_of(&[
+            "taskshoot",
+            "task",
+            "update",
+            "DEV-1",
+            "--start-available-date",
+            "",
+        ]) {
+            TaskCmd::Update {
+                start_available_date,
+                ..
+            } => assert_eq!(start_available_date.as_deref(), Some("")),
+            _ => panic!("expected task update"),
+        }
+    }
+
+    #[test]
+    fn task_create_content_conflicts_with_start_available_date() {
+        // --content creates an untracked casual task, which has no fields to set.
+        assert!(Cli::try_parse_from([
+            "taskshoot",
+            "task",
+            "create",
+            "--project",
+            "DEV",
+            "--content",
+            "a note",
+            "--start-available-date",
+            "2026-09-06",
+        ])
+        .is_err());
     }
 
     fn ordering_of(args: &[&str]) -> Option<u32> {

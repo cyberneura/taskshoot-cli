@@ -221,6 +221,7 @@ taskshoot task create --project DEV --content "a casual note"   # untracked (no 
 taskshoot task update DEV-12 --status in-progress --progress 50
 taskshoot task update DEV-12 --bot-ready true  # bot-ready flag (change is logged)
 taskshoot task update DEV-12 --category Dev    # set category (name or id; "" clears it)
+taskshoot task update DEV-12 --start-available-date 2026-09-06  # earliest date work may start ("" clears it)
 taskshoot task claim DEV-12                     # assignee=me + move to in-progress (--status overrides)
 taskshoot task claim DEV-12 --if-unassigned     # claim only if unassigned (409 if already taken)
 taskshoot task complete DEV-12 --comment "Done"     # move to the terminal stage
@@ -421,6 +422,13 @@ done
   - The merged list is re-ordered newest-first on the server's own key, so it reads exactly
     like a single-filter listing.
   - It cannot be combined with `--assignee` or `--mentioned` (it already is both).
+- `--start-available-date` (task create / update) is the earliest date work may start
+  (`YYYY-MM-DD`, no time part). Use it when a task is already fully specified but cannot be
+  started until a known date — an embargo lifting, a dependency's release becoming
+  installable, a contract renewal. The web UI shows the date on the task card and pushes the
+  task to the end of the list, dimmed, until that day arrives, so a task with the date set
+  stays out of the way instead of looking like work that is being ignored.
+  `task update --start-available-date ""` clears it.
 - `--category` (task create / update) takes a category name (case-insensitive) or id. List
   them with `taskshoot categories --project <KEY>`. `task update --category ""` clears it.
 - `category create` / `category update` manage the categories themselves and **require the
