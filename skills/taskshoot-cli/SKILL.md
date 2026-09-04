@@ -128,6 +128,7 @@ taskshoot task update DEV-12 --bot-ready true    # bot-ready flag (change is log
 taskshoot task update DEV-12 --category Dev      # set category (name or id; "" clears it)
 taskshoot task update DEV-12 --started-at "$(date -Iseconds)"       # record start time (ISO8601)
 taskshoot task update DEV-12 --completed-at "$(date -Iseconds)"     # record completion time (ISO8601)
+taskshoot task update DEV-12 --start-available-date 2026-09-06      # earliest date work may start (YYYY-MM-DD)
 
 taskshoot task claim DEV-12                       # assignee=me + move to in-progress
 taskshoot task claim DEV-12 --if-unassigned       # claim only if unassigned (409 if already taken)
@@ -320,6 +321,13 @@ taskshoot listen --no-state                      # do not persist the cursor at 
 - **`task complete`** moves to the workflow's terminal stage. If the project has an
   acceptance flow, the task enters the acceptance phase instead of being completed (by
   design). `--comment` is posted to the thread after completion succeeds.
+- **`--start-available-date`** (`task create` / `task update`) is the earliest date work may
+  start (`YYYY-MM-DD`, no time part; `""` clears it). Set it when a task is fully specified
+  but cannot begin until a known date — an embargo lifting, a dependency version becoming
+  installable, a contract renewal. The web UI shows the date on the card and moves the task
+  to the end of the list, dimmed, until that day, so it stops competing for attention with
+  work that can actually be started now. Do not use it as a soft due date: it says "not
+  before", not "by then" (that is `--due-date`).
 - **`--started-at` / `--completed-at` are not set automatically** by `claim` / `complete`.
   If you want them recorded, set them explicitly with `task update` at the moment of start
   / completion (`date -Iseconds` produces an accepted ISO8601 value; `""` clears to null).

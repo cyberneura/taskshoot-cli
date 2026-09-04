@@ -1442,6 +1442,11 @@ pub fn show(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> Res
     if !task.labels.is_empty() {
         println!("labels:   {}", task.labels.join(", "));
     }
+    // Earliest date work may start. "start on" rather than "start", so it is not
+    // read as started_at (the actual start timestamp).
+    if let Some(start_available) = &task.start_available_date {
+        println!("start on: {}", start_available);
+    }
     if let Some(due) = &task.due_date {
         println!("due:      {}", due);
     }
@@ -1477,6 +1482,7 @@ pub struct CreateArgs {
     pub assignee: Option<String>,
     pub owner: Option<String>,
     pub priority: Option<i64>,
+    pub start_available_date: Option<String>,
     pub due_date: Option<String>,
     pub labels: Vec<String>,
     pub category: Option<String>,
@@ -1517,6 +1523,12 @@ pub fn create(api: &Api, args: &CreateArgs, json: bool) -> Result<()> {
     }
     if let Some(priority) = args.priority {
         body.insert("priority".to_string(), json!(priority));
+    }
+    if let Some(start_available_date) = &args.start_available_date {
+        body.insert(
+            "start_available_date".to_string(),
+            json!(start_available_date),
+        );
     }
     if let Some(due_date) = &args.due_date {
         body.insert("due_date".to_string(), json!(due_date));
@@ -1563,6 +1575,7 @@ pub struct UpdateArgs {
     pub title: Option<String>,
     pub description: Option<String>,
     pub priority: Option<i64>,
+    pub start_available_date: Option<String>,
     pub due_date: Option<String>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
@@ -1614,6 +1627,13 @@ pub fn update(
     }
     if let Some(priority) = args.priority {
         body.insert("priority".to_string(), json!(priority));
+    }
+    // YYYY-MM-DD. An empty string is interpreted as None (clear) by the server's _parse_date.
+    if let Some(start_available_date) = &args.start_available_date {
+        body.insert(
+            "start_available_date".to_string(),
+            json!(start_available_date),
+        );
     }
     if let Some(due_date) = &args.due_date {
         body.insert("due_date".to_string(), json!(due_date));
