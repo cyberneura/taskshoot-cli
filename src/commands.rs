@@ -1347,13 +1347,19 @@ pub fn search(api: &Api, query: &str, limit: u32, categories: &[String], json: b
 /// One table row for `search`. The category is shown because search spans every
 /// project, where it is the quickest way to tell apart tasks with similar
 /// titles. A task without one prints `-`, as in the `task show` summary line.
+///
+/// The name is printed in full. It is an identifier here, not prose: `search
+/// --category` matches on the exact name, so a truncated cell would neither be
+/// reusable nor tell apart two categories that share a long prefix. The title
+/// is truncated because nothing is looked up by it (Codex review).
 fn search_row(item: &SearchResult) -> Vec<String> {
     vec![
         item.display_ref(),
         item.status_label.clone(),
         item.category
             .as_ref()
-            .map_or("-".to_string(), |c| truncate_width(&c.name, 16)),
+            .map_or("-", |c| c.name.as_str())
+            .to_string(),
         truncate_width(&item.title, 64),
     ]
 }
@@ -2087,6 +2093,19 @@ mod tests {
                 "Astragal".to_string(),
                 "deploy pipeline broken".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn search_row_keeps_a_long_category_name_whole() {
+        // The name is what `search --category` matches on, so a truncated cell
+        // would be unusable and would collapse two categories that share a
+        // long prefix into the same text (Codex review).
+        let long = "Customer support escalations";
+        assert_eq!(search_row(&search_result(Some(long)))[2], long);
+        assert_ne!(
+            search_row(&search_result(Some("Customer support escalations")))[2],
+            search_row(&search_result(Some("Customer support integrations")))[2],
         );
     }
 
