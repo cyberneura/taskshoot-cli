@@ -101,6 +101,11 @@ pub struct SearchResult {
     pub title: String,
     #[serde(default)]
     pub status_label: String,
+    /// Category of the task, if it has one. Search spans every project, so the
+    /// name alone does not say which project's category this is: read it with
+    /// the project key in the same row.
+    #[serde(default)]
+    pub category: Option<TaskCategory>,
 }
 
 impl SearchResult {
