@@ -477,6 +477,9 @@ done
 - `search` searches across all projects in the organization (`/task-search/` API). The
   server side is a hybrid of bigram (substring) + vector (semantic) search over title,
   description and comment bodies; a `KEY-number` or bare number matches directly.
+  - The table has a `CATEGORY` column (`-` when the task has none). Because the search
+    spans every project, read the category together with the ref in the same row: the
+    same category name can exist in more than one project.
 
 ### Example AI-agent flow
 

@@ -1339,18 +1339,29 @@ pub fn search(api: &Api, query: &str, limit: u32, categories: &[String], json: b
         println!("no tasks matched");
         return Ok(());
     }
-    let rows: Vec<Vec<String>> = items
-        .iter()
-        .map(|item| {
-            vec![
-                item.display_ref(),
-                item.status_label.clone(),
-                truncate_width(&item.title, 64),
-            ]
-        })
-        .collect();
-    print_table(&["REF", "STATUS", "TITLE"], &rows);
+    let rows: Vec<Vec<String>> = items.iter().map(search_row).collect();
+    print_table(&["REF", "STATUS", "CATEGORY", "TITLE"], &rows);
     Ok(())
+}
+
+/// One table row for `search`. The category is shown because search spans every
+/// project, where it is the quickest way to tell apart tasks with similar
+/// titles. A task without one prints `-`, as in the `task show` summary line.
+///
+/// The name is printed in full. It is an identifier here, not prose: `search
+/// --category` matches on the exact name, so a truncated cell would neither be
+/// reusable nor tell apart two categories that share a long prefix. The title
+/// is truncated because nothing is looked up by it (Codex review).
+fn search_row(item: &SearchResult) -> Vec<String> {
+    vec![
+        item.display_ref(),
+        item.status_label.clone(),
+        item.category
+            .as_ref()
+            .map_or("-", |c| c.name.as_str())
+            .to_string(),
+        truncate_width(&item.title, 64),
+    ]
 }
 
 /// Resolve the `--category` specs of an organization-wide search into ids.
@@ -2053,6 +2064,72 @@ pub fn notifications_read(api: &Api, ids: &[String], all: bool, json: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search_result(category: Option<&str>) -> SearchResult {
+        from_value(json!({
+            "id": "019f5463-06e7-7362-8fc4-3289ee74b546",
+            "project_key": "DEV",
+            "number": 12,
+            "title": "deploy pipeline broken",
+            "status_label": "In progress",
+            "category": category.map(|name| json!({
+                "id": "019f5463-06e7-7362-8fc4-3289ee74b547",
+                "name": name,
+                "color": "#ff8800",
+                "ordering": 0,
+                "active": true,
+            })),
+        }))
+        .expect("a search result deserializes")
+    }
+
+    #[test]
+    fn search_row_shows_the_category() {
+        assert_eq!(
+            search_row(&search_result(Some("Astragal"))),
+            vec![
+                "DEV-12".to_string(),
+                "In progress".to_string(),
+                "Astragal".to_string(),
+                "deploy pipeline broken".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_row_keeps_a_long_category_name_whole() {
+        // The name is what `search --category` matches on, so a truncated cell
+        // would be unusable and would collapse two categories that share a
+        // long prefix into the same text (Codex review).
+        let long = "Customer support escalations";
+        assert_eq!(search_row(&search_result(Some(long)))[2], long);
+        assert_ne!(
+            search_row(&search_result(Some("Customer support escalations")))[2],
+            search_row(&search_result(Some("Customer support integrations")))[2],
+        );
+    }
+
+    #[test]
+    fn search_row_marks_a_task_without_a_category() {
+        // `-`, as in the `task show` summary line. An empty cell would read as
+        // "the API did not say" rather than "this task has no category".
+        assert_eq!(search_row(&search_result(None))[2], "-");
+    }
+
+    #[test]
+    fn search_result_without_a_category_key_still_deserializes() {
+        // The field is served by a newer backend than some deployments run, and
+        // the CLI must not fail against an API that predates it.
+        let item: SearchResult = from_value(json!({
+            "id": "019f5463-06e7-7362-8fc4-3289ee74b546",
+            "project_key": "DEV",
+            "number": 12,
+            "title": "deploy pipeline broken",
+            "status_label": "In progress",
+        }))
+        .expect("category is optional");
+        assert!(item.category.is_none());
+    }
 
     #[test]
     fn activity_body_is_empty_without_options() {
