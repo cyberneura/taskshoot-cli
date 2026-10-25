@@ -91,6 +91,7 @@ taskshoot user ytyng                            # one user: handle name, display
 taskshoot user me --json                        # your own row (handy to grab your user id)
 taskshoot workflows --project DEV               # progress flows and stages (value / label / terminal)
 taskshoot categories --project DEV              # task categories (id / name / color / ordering / state)
+taskshoot priorities --project DEV              # priority options (value / label; smaller value = higher priority)
 
 taskshoot tasks --project DEV                   # list tasks
 taskshoot tasks --project DEV,SALES             # several projects merged into one list (OR)
@@ -126,6 +127,7 @@ taskshoot task create --project DEV --content "a casual note"       # untracked 
 taskshoot task update DEV-12 --status in-progress --progress 50
 taskshoot task update DEV-12 --bot-ready true    # bot-ready flag (change is logged)
 taskshoot task update DEV-12 --category Dev      # set category (name or id; "" clears it)
+taskshoot task update DEV-12 --priority high     # label (case-insensitive) or number; smaller number = higher
 taskshoot task update DEV-12 --started-at "$(date -Iseconds)"       # record start time (ISO8601)
 taskshoot task update DEV-12 --completed-at "$(date -Iseconds)"     # record completion time (ISO8601)
 taskshoot task update DEV-12 --start-available-date 2026-09-06      # earliest date work may start (YYYY-MM-DD)

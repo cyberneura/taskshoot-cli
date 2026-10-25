@@ -60,6 +60,11 @@ enum Cmd {
         #[arg(long)]
         project: String,
     },
+    /// List the priority options of a project (smaller value = higher priority)
+    Priorities {
+        #[arg(long)]
+        project: String,
+    },
     /// Create / update a task category (requires the manager role or higher)
     #[command(subcommand)]
     Category(CategoryCmd),
@@ -355,8 +360,11 @@ enum TaskCmd {
         assignee: Option<String>,
         #[arg(long)]
         owner: Option<String>,
+        /// Priority: a label of the project (case-insensitive) or its number.
+        /// Smaller numbers are higher priorities (defaults: 10 = High,
+        /// 20 = Medium, 30 = Low). List them with `taskshoot priorities`
         #[arg(long)]
-        priority: Option<i64>,
+        priority: Option<String>,
         /// Earliest date work may start. YYYY-MM-DD. The task list shows it and
         /// deprioritizes the task until then
         #[arg(long)]
@@ -391,8 +399,11 @@ enum TaskCmd {
         title: Option<String>,
         #[arg(long)]
         description: Option<String>,
+        /// Priority: a label of the project (case-insensitive) or its number.
+        /// Smaller numbers are higher priorities (defaults: 10 = High,
+        /// 20 = Medium, 30 = Low). List them with `taskshoot priorities`
         #[arg(long)]
-        priority: Option<i64>,
+        priority: Option<String>,
         /// Earliest date work may start. YYYY-MM-DD. Empty string clears it
         #[arg(long)]
         start_available_date: Option<String>,
@@ -544,6 +555,7 @@ fn run() -> Result<()> {
         Cmd::User { user } => commands::user(&api, &user, json),
         Cmd::Workflows { project } => commands::workflows(&api, &project, json),
         Cmd::Categories { project } => commands::categories(&api, &project, json),
+        Cmd::Priorities { project } => commands::priorities(&api, &project, json),
         Cmd::Category(cmd) => match cmd {
             CategoryCmd::Create {
                 project,
@@ -824,6 +836,46 @@ mod tests {
             Cmd::Task(task_cmd) => *task_cmd,
             _ => panic!("expected a task command"),
         }
+    }
+
+    #[test]
+    fn task_priority_accepts_labels_and_numbers() {
+        let priority_of = |value: &str| match activity_of(&[
+            "taskshoot",
+            "task",
+            "update",
+            "DEV-1",
+            "--priority",
+            value,
+        ]) {
+            TaskCmd::Update { priority, .. } => priority,
+            _ => panic!("expected task update"),
+        };
+        assert_eq!(priority_of("high").as_deref(), Some("high"));
+        assert_eq!(priority_of("10").as_deref(), Some("10"));
+        let created = activity_of(&[
+            "taskshoot",
+            "task",
+            "create",
+            "--project",
+            "DEV",
+            "--title",
+            "t",
+            "--priority",
+            "Low",
+        ]);
+        assert!(matches!(created, TaskCmd::Create { priority: Some(p), .. } if p == "Low"));
+    }
+
+    #[test]
+    fn priorities_requires_a_project() {
+        assert!(Cli::try_parse_from(["taskshoot", "priorities"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["taskshoot", "priorities", "--project", "DEV"])
+                .unwrap()
+                .command,
+            Cmd::Priorities { .. }
+        ));
     }
 
     #[test]
