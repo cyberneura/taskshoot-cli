@@ -185,6 +185,7 @@ taskshoot user ytyng                           # one user (handle name, display 
 taskshoot user me --json                       # your own user row (id for scripting)
 taskshoot workflows --project DEV              # progress flows and stages (value / label / terminal)
 taskshoot categories --project DEV             # task categories (id / name / color / ordering / state)
+taskshoot priorities --project DEV             # priority options (value / label / state; smaller = higher)
 
 taskshoot category create --project DEV --name Bug --color red --ordering 5
 taskshoot category update Bug --project DEV --name Defect       # rename (name or id)
@@ -221,6 +222,7 @@ taskshoot task create --project DEV --content "a casual note"   # untracked (no 
 taskshoot task update DEV-12 --status in-progress --progress 50
 taskshoot task update DEV-12 --bot-ready true  # bot-ready flag (change is logged)
 taskshoot task update DEV-12 --category Dev    # set category (name or id; "" clears it)
+taskshoot task update DEV-12 --priority high    # priority label (case-insensitive) or number
 taskshoot task update DEV-12 --start-available-date 2026-09-06  # earliest date work may start ("" clears it)
 taskshoot task claim DEV-12                     # assignee=me + move to in-progress (--status overrides)
 taskshoot task claim DEV-12 --if-unassigned     # claim only if unassigned (409 if already taken)
@@ -429,6 +431,10 @@ done
   task to the end of the list, dimmed, until that day arrives, so a task with the date set
   stays out of the way instead of looking like work that is being ignored.
   `task update --start-available-date ""` clears it.
+- `--priority` (task create / update) takes a priority label of the project (case-insensitive)
+  or its number. **Smaller numbers are higher priorities**: the defaults are `10` = High,
+  `20` = Medium, `30` = Low, but a project can define its own options, so prefer the label.
+  List them with `taskshoot priorities --project <KEY>`; an unknown label fails with the list.
 - `--category` (task create / update) takes a category name (case-insensitive) or id. List
   them with `taskshoot categories --project <KEY>`. `task update --category ""` clears it.
 - `category create` / `category update` manage the categories themselves and **require the

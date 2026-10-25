@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::api::{from_value, Api, TasksQuery};
 use crate::models::{
-    AssignableUser, Me, MentionCandidate, NotificationList, Org, OrgUser, Project, ReactionEmoji,
-    SearchResult, Task, TaskCategory, TaskEvent, Workflow,
+    AssignableUser, Me, MentionCandidate, NotificationList, Org, OrgUser, PriorityOption, Project,
+    ReactionEmoji, SearchResult, Task, TaskCategory, TaskEvent, Workflow,
 };
 use crate::output::{print_table, truncate_width};
 use crate::stages;
@@ -328,6 +328,83 @@ pub fn categories(api: &Api, project: &str, json: bool) -> Result<()> {
     let rows: Vec<Vec<String>> = items.iter().map(category_row).collect();
     print_table(&CATEGORY_COLUMNS, &rows);
     Ok(())
+}
+
+pub fn priorities(api: &Api, project: &str, json: bool) -> Result<()> {
+    let value = api.priority_options(project)?;
+    if json {
+        return print_json(&value);
+    }
+    let mut items: Vec<PriorityOption> = from_value(value)?;
+    items.sort_by_key(|o| o.value);
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|o| {
+            vec![
+                o.value.to_string(),
+                o.label.clone(),
+                if o.active { "active" } else { "inactive" }.to_string(),
+            ]
+        })
+        .collect();
+    print_table(&["VALUE", "LABEL", "STATE"], &rows);
+    Ok(())
+}
+
+/// Resolve a `--priority` spec into the value sent to the server: a number is
+/// passed through as-is, anything else is looked up as a priority label of the
+/// project (case-insensitive).
+fn resolve_priority(api: &Api, project: &str, spec: &str) -> Result<i64> {
+    if let Ok(value) = spec.trim().parse::<i64>() {
+        return Ok(value);
+    }
+    let options: Vec<PriorityOption> = from_value(api.priority_options(project)?)?;
+    match_priority(spec, &options)
+}
+
+/// Match a priority label against the options. Active options win over
+/// inactive ones with the same label, so a label that was retired and
+/// re-created still resolves.
+fn match_priority(spec: &str, options: &[PriorityOption]) -> Result<i64> {
+    let needle = spec.trim().to_lowercase();
+    if needle.is_empty() {
+        bail!("--priority is empty; specify a label or a number");
+    }
+    let matching = |active: bool| -> Vec<&PriorityOption> {
+        options
+            .iter()
+            .filter(|o| o.active == active && o.label.trim().to_lowercase() == needle)
+            .collect()
+    };
+    let mut matches = matching(true);
+    if matches.is_empty() {
+        matches = matching(false);
+    }
+    match matches.as_slice() {
+        [only] => Ok(only.value),
+        [] => {
+            // Inactive options are listed too (marked), since they still resolve.
+            let mut sorted: Vec<&PriorityOption> = options.iter().collect();
+            sorted.sort_by_key(|o| (!o.active, o.value));
+            bail!(
+                "unknown priority '{}' in this project; available (smaller is higher): {}",
+                spec.trim(),
+                sorted
+                    .iter()
+                    .map(|o| if o.active {
+                        format!("{} ({})", o.label, o.value)
+                    } else {
+                        format!("{} ({}, inactive)", o.label, o.value)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        _ => bail!(
+            "priority label '{}' is ambiguous; specify the number instead",
+            spec.trim()
+        ),
+    }
 }
 
 const CATEGORY_COLUMNS: [&str; 5] = ["ID", "NAME", "COLOR", "ORDERING", "STATE"];
@@ -1492,7 +1569,8 @@ pub struct CreateArgs {
     pub status: Option<String>,
     pub assignee: Option<String>,
     pub owner: Option<String>,
-    pub priority: Option<i64>,
+    /// Priority label (case-insensitive) or number.
+    pub priority: Option<String>,
     pub start_available_date: Option<String>,
     pub due_date: Option<String>,
     pub labels: Vec<String>,
@@ -1532,8 +1610,11 @@ pub fn create(api: &Api, args: &CreateArgs, json: bool) -> Result<()> {
             json!(resolve_user_id(api, &args.project, owner)?),
         );
     }
-    if let Some(priority) = args.priority {
-        body.insert("priority".to_string(), json!(priority));
+    if let Some(priority) = &args.priority {
+        body.insert(
+            "priority".to_string(),
+            json!(resolve_priority(api, &args.project, priority)?),
+        );
     }
     if let Some(start_available_date) = &args.start_available_date {
         body.insert(
@@ -1585,7 +1666,8 @@ pub struct UpdateArgs {
     pub progress: Option<i64>,
     pub title: Option<String>,
     pub description: Option<String>,
-    pub priority: Option<i64>,
+    /// Priority label (case-insensitive) or number.
+    pub priority: Option<String>,
     pub start_available_date: Option<String>,
     pub due_date: Option<String>,
     pub started_at: Option<String>,
@@ -1636,8 +1718,11 @@ pub fn update(
     if let Some(description) = &args.description {
         body.insert("description".to_string(), json!(description));
     }
-    if let Some(priority) = args.priority {
-        body.insert("priority".to_string(), json!(priority));
+    if let Some(priority) = &args.priority {
+        body.insert(
+            "priority".to_string(),
+            json!(resolve_priority(api, &project, priority)?),
+        );
     }
     // YYYY-MM-DD. An empty string is interpreted as None (clear) by the server's _parse_date.
     if let Some(start_available_date) = &args.start_available_date {
@@ -2063,6 +2148,59 @@ pub fn notifications_read(api: &Api, ids: &[String], all: bool, json: bool) -> R
 
 #[cfg(test)]
 mod tests {
+
+    fn priority(value: i64, label: &str, active: bool) -> PriorityOption {
+        PriorityOption {
+            value,
+            label: label.to_string(),
+            active,
+        }
+    }
+
+    fn default_priorities() -> Vec<PriorityOption> {
+        vec![
+            priority(10, "High", true),
+            priority(20, "Medium", true),
+            priority(30, "Low", true),
+        ]
+    }
+
+    #[test]
+    fn match_priority_resolves_labels_case_insensitively() {
+        let options = default_priorities();
+        assert_eq!(match_priority("High", &options).unwrap(), 10);
+        assert_eq!(match_priority("high", &options).unwrap(), 10);
+        assert_eq!(match_priority(" LOW ", &options).unwrap(), 30);
+    }
+
+    #[test]
+    fn match_priority_lists_choices_for_unknown_labels() {
+        let mut options = default_priorities();
+        options.push(priority(5, "Retired", false));
+        let err = match_priority("urgent", &options).unwrap_err().to_string();
+        assert!(err.contains("unknown priority 'urgent'"), "{err}");
+        assert!(err.contains("High (10), Medium (20), Low (30)"), "{err}");
+        assert!(err.ends_with("Low (30), Retired (5, inactive)"), "{err}");
+    }
+
+    #[test]
+    fn match_priority_prefers_active_options() {
+        let options = vec![priority(10, "High", false), priority(15, "High", true)];
+        assert_eq!(match_priority("high", &options).unwrap(), 15);
+        // An inactive label still resolves when no active option has it.
+        let options = vec![priority(10, "High", false), priority(20, "Medium", true)];
+        assert_eq!(match_priority("high", &options).unwrap(), 10);
+    }
+
+    #[test]
+    fn match_priority_rejects_ambiguous_and_empty_labels() {
+        let options = vec![priority(10, "High", true), priority(11, "high", true)];
+        assert!(match_priority("High", &options)
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+        assert!(match_priority("  ", &default_priorities()).is_err());
+    }
     use super::*;
 
     fn search_result(category: Option<&str>) -> SearchResult {

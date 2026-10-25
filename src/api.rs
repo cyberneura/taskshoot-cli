@@ -310,6 +310,12 @@ impl Api {
         self.get(&self.project_path(project, "workflows/")?)
     }
 
+    /// Priority options of a project (the server returns the defaults when the
+    /// project has none of its own).
+    pub fn priority_options(&self, project: &str) -> Result<Value> {
+        self.get(&self.project_path(project, "priority-options/")?)
+    }
+
     pub fn task_categories(&self, project: &str) -> Result<Value> {
         self.get(&self.project_path(project, "task-categories/")?)
     }

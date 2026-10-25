@@ -155,6 +155,18 @@ pub struct TaskCategory {
     pub active: bool,
 }
 
+/// One priority option of a project. Smaller values are higher priorities
+/// (the server default is 10 = High / 20 = Medium / 30 = Low). The server also
+/// sends an `id`, which is null for the defaults of a project that has no
+/// options of its own; the CLI does not need it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PriorityOption {
+    pub value: i64,
+    pub label: String,
+    #[serde(default = "default_true")]
+    pub active: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaskEvent {
     /// Message id. Needed to target a message with `reaction add/remove`.
