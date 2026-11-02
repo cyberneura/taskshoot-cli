@@ -170,22 +170,12 @@ jobs:
           ./target/release/taskshoot --version | grep -qx "taskshoot ${VERSION}"
 
       # A stale plugin manifest would ship a marketplace entry claiming the
-      # previous release's contents.
+      # previous release's contents. test.yml runs the same script on every pull
+      # request, so this should never be what stops a release.
       - name: Check the plugin manifests
         env:
           VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          for spec in \
-            ".claude-plugin/marketplace.json|.plugins[] | select(.name == \"taskshoot\") | .version" \
-            ".claude-plugin/plugin.json|.version"; do
-            manifest=${spec%%|*}
-            filter=${spec#*|}
-            found=$(jq -r "$filter // empty" "$manifest")
-            if [ "$found" != "$VERSION" ]; then
-              echo "::error::${manifest} declares '${found:-nothing}', but Cargo.toml declares ${VERSION}"
-              exit 1
-            fi
-          done
+        run: ./check-manifests.sh "$VERSION"
 
   tag:
     needs: [plan, check]

@@ -30,6 +30,13 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      # Cargo.toml の version と .claude-plugin/ の 2 つの manifest の一致。
+      # tag-on-version-change.yml はマージ後に同じ検査でタグ付けを拒否するが、
+      # PR の段階で見ていなかったため v0.10.0 がタグも Release も無いまま main に
+      # 残った (CYBERNEURA-DEV-1184)。
+      - name: Plugin manifests
+        run: ./check-manifests.sh
+
       # --locked を付けないと、Cargo.toml だけ変えて Cargo.lock を更新し忘れた
       # PR でも runner 上で lock が黙って書き換わり、コミットに含まれていない
       # 依存でテストが通ってしまう。

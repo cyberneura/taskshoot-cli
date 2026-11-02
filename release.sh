@@ -43,18 +43,9 @@ VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].vers
 TAG="v${VERSION}"
 step "Checking ${TAG}"
 
-# Every manifest that carries this version has to agree. A stale plugin manifest
-# would ship a marketplace entry claiming the previous release's contents. Each
-# field is addressed explicitly, so a version added elsewhere in a manifest
-# later on cannot be mistaken for the one being checked.
-check_manifest() {
-  local manifest=$1 filter=$2 found
-  found=$(jq -r "$filter // empty" "$manifest")
-  [ "$found" = "$VERSION" ] ||
-    fail "$manifest declares '${found:-nothing}' at $filter, but Cargo.toml declares $VERSION"
-}
-check_manifest .claude-plugin/marketplace.json '.plugins[] | select(.name == "taskshoot") | .version'
-check_manifest .claude-plugin/plugin.json '.version'
+# Every manifest that carries this version has to agree. The check is shared
+# with CI so that the copies cannot drift apart.
+./check-manifests.sh "$VERSION" || fail "the plugin manifests disagree with Cargo.toml"
 lock_version=$(cargo metadata --format-version 1 --locked >/dev/null 2>&1 && echo ok || echo stale)
 [ "$lock_version" = ok ] || fail "Cargo.lock is out of date; run 'cargo build' and commit it"
 echo "Cargo.toml, both plugin manifests and Cargo.lock all agree on ${VERSION}"
