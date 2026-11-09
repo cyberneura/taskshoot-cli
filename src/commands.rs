@@ -1542,6 +1542,9 @@ pub fn show(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> Res
         "tracked:  {} / bot_ready: {} / events: {} / id: {}",
         task.tracked, task.bot_ready, task.event_count, task.id
     );
+    if task.time_logged_minutes > 0 {
+        println!("logged:   {}", format_minutes(task.time_logged_minutes));
+    }
     if !task.description.is_empty() {
         println!("\n{}", task.description);
     }
@@ -1837,6 +1840,49 @@ pub fn comment(
     Ok(())
 }
 
+/// "1h 30m" / "1h" / "45m". The total is shown in the same form as the web UI.
+fn format_minutes(total: u64) -> String {
+    let (hours, minutes) = (total / 60, total % 60);
+    match (hours, minutes) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    }
+}
+
+fn log_time_body(minutes: u32, date: Option<&str>, note: Option<&str>) -> Value {
+    let mut body = json!({ "minutes": minutes });
+    if let Some(date) = date {
+        body["date"] = json!(date);
+    }
+    if let Some(note) = note {
+        body["note"] = json!(note);
+    }
+    body
+}
+
+pub fn log_time(
+    api: &Api,
+    task_arg: &str,
+    project: Option<&str>,
+    minutes: u32,
+    date: Option<&str>,
+    note: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let (project, task_ref) = resolve_target(task_arg, project)?;
+    let value = api.log_time(&project, &task_ref, &log_time_body(minutes, date, note))?;
+    if json {
+        return print_json(&value);
+    }
+    println!(
+        "logged {} on {task_arg} ({})",
+        format_minutes(u64::from(minutes)),
+        value["date"].as_str().unwrap_or("?"),
+    );
+    Ok(())
+}
+
 pub fn events(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> Result<()> {
     let (project, task_ref) = resolve_target(task_arg, project)?;
     let value = api.events(&project, &task_ref)?;
@@ -1856,6 +1902,14 @@ pub fn events(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
         );
         for line in event.content.lines() {
             println!("  {line}");
+        }
+        // time_log events keep the amount in metadata; content is only the note.
+        if event.event_type == "time_log" {
+            println!(
+                "  logged {} on {}",
+                format_minutes(event.metadata["minutes"].as_u64().unwrap_or(0)),
+                event.metadata["date"].as_str().unwrap_or("?"),
+            );
         }
         // For events like field_change, content is empty and the diff is in metadata.changes
         if let Some(changes) = event.metadata.get("changes").and_then(|c| c.as_array()) {
@@ -2148,6 +2202,25 @@ pub fn notifications_read(api: &Api, ids: &[String], all: bool, json: bool) -> R
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn format_minutes_matches_the_web_ui() {
+        assert_eq!(format_minutes(0), "0m");
+        assert_eq!(format_minutes(45), "45m");
+        assert_eq!(format_minutes(60), "1h");
+        assert_eq!(format_minutes(90), "1h 30m");
+    }
+
+    #[test]
+    fn log_time_body_only_sends_what_was_given() {
+        assert_eq!(
+            log_time_body(90, None, None),
+            serde_json::json!({ "minutes": 90 })
+        );
+        assert_eq!(
+            log_time_body(5, Some("2026-11-01"), Some("note")),
+            serde_json::json!({ "minutes": 5, "date": "2026-11-01", "note": "note" })
+        );
+    }
 
     fn priority(value: i64, label: &str, active: bool) -> PriorityOption {
         PriorityOption {

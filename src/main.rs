@@ -461,6 +461,21 @@ enum TaskCmd {
         #[arg(long = "file")]
         files: Vec<PathBuf>,
     },
+    /// Log time spent on a task (shows up in the thread and in the task's total)
+    LogTime {
+        task: String,
+        /// Minutes spent (1-1440 per entry)
+        #[arg(long)]
+        minutes: u32,
+        /// Day the work was done (YYYY-MM-DD). Defaults to today in your timezone.
+        #[arg(long)]
+        date: Option<String>,
+        /// Note shown next to the entry
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Show the task thread (events)
     Events {
         task: String,
@@ -735,6 +750,21 @@ fn run() -> Result<()> {
                 project,
                 files,
             } => commands::comment(&api, &task, project.as_deref(), &message, &files, json),
+            TaskCmd::LogTime {
+                task,
+                minutes,
+                date,
+                note,
+                project,
+            } => commands::log_time(
+                &api,
+                &task,
+                project.as_deref(),
+                minutes,
+                date.as_deref(),
+                note.as_deref(),
+                json,
+            ),
             TaskCmd::Events { task, project } => {
                 commands::events(&api, &task, project.as_deref(), json)
             }

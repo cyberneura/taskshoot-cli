@@ -229,6 +229,7 @@ taskshoot task claim DEV-12 --if-unassigned     # claim only if unassigned (409 
 taskshoot task complete DEV-12 --comment "Done"     # move to the terminal stage
 taskshoot task comment DEV-12 "progress update" --file ./screenshot.png
 taskshoot task events DEV-12                     # show the thread (prints message ids)
+taskshoot task log-time DEV-12 --minutes 90 --note "review"  # log time (--date YYYY-MM-DD, default today)
 taskshoot task track <uuid> --project DEV        # untracked -> tracked (assigns a number)
 taskshoot task cancel DEV-12 --reason "duplicate"
 taskshoot task resume DEV-12

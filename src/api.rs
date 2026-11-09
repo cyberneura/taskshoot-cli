@@ -235,6 +235,10 @@ impl Api {
         )
     }
 
+    pub fn log_time(&self, project: &str, task_ref: &str, body: &Value) -> Result<Value> {
+        self.post(&self.task_path(project, task_ref, "/time-entries/")?, body)
+    }
+
     /// Emoji shortcodes that can be used for reactions (server-defined).
     pub fn reaction_emojis(&self) -> Result<Value> {
         self.get(&self.org_path("reaction-emojis/")?)
