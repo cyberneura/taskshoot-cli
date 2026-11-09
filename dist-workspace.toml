@@ -23,3 +23,9 @@ publish-jobs = []
 plan-jobs = ["./test"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+
+# GitHub retired the macos-14 hosted image that dist picks by default for this
+# target: the job is cancelled at once with "The configuration
+# 'macos-14-arm64-us-default' is not supported", and no release is published.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
