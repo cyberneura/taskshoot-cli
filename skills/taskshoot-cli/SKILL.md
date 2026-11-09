@@ -116,6 +116,7 @@ taskshoot search deploy --category bug           # narrow to a category (name or
 
 taskshoot task show DEV-12                       # details (bot_ready / assignee / phase / status)
 taskshoot task events DEV-12                     # show the chat thread
+taskshoot task log-time DEV-12 --minutes 90 --note "review"  # log time (--date YYYY-MM-DD, default today)
 ```
 
 ### Create, update, and lifecycle

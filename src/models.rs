@@ -80,6 +80,9 @@ pub struct Task {
     pub latest_event_at: Option<String>,
     #[serde(default)]
     pub event_count: i64,
+    /// Total time logged (minutes). Absent on servers older than the time-tracking API.
+    #[serde(default)]
+    pub time_logged_minutes: u64,
     pub created_at: String,
 }
 
