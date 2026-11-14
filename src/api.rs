@@ -295,6 +295,41 @@ impl Api {
         self.send(self.request(reqwest::Method::POST, &path).multipart(form))
     }
 
+    /// Stream an attachment into `dest`. The endpoint answers with a 302 to a
+    /// short-lived signed URL; reqwest follows it and drops the Authorization
+    /// header when the redirect leaves the API origin, so the API key is not
+    /// sent to the storage host.
+    ///
+    /// The path is built from the id rather than taken from the `url` field of
+    /// the event payload, so a payload can never point the bearer token at a
+    /// host of its choosing.
+    pub fn download_attachment(
+        &self,
+        project: &str,
+        task_ref: &str,
+        attachment_id: &str,
+        dest: &mut dyn std::io::Write,
+    ) -> Result<u64> {
+        let path = self.task_path(
+            project,
+            task_ref,
+            &format!("/attachments/{}/", enc(attachment_id)),
+        )?;
+        let mut response = self
+            .request(reqwest::Method::GET, &path)
+            .timeout(Duration::from_secs(300))
+            .send()
+            .context("request failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().unwrap_or_default();
+            bail!("API error {}: {}", status.as_u16(), extract_detail(&text));
+        }
+        response
+            .copy_to(dest)
+            .context("failed to read the attachment body")
+    }
+
     pub fn track(&self, project: &str, task_ref: &str) -> Result<Value> {
         self.post(&self.task_path(project, task_ref, "/track")?, &json!({}))
     }

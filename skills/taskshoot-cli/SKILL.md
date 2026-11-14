@@ -116,6 +116,18 @@ taskshoot search deploy --category bug           # narrow to a category (name or
 
 taskshoot task show DEV-12                       # details (bot_ready / assignee / phase / status)
 taskshoot task events DEV-12                     # show the chat thread
+taskshoot task attachments DEV-12                # list the files attached in the thread
+taskshoot task attachments DEV-12 --download     # save them and print the local paths
+```
+
+Images and other files posted in a thread are not in the `events` text. To look at one,
+download it with `task attachments --download` (add `--id <attachment-id>` for just one)
+and open the printed path with your file reader. Files go under
+`$TMPDIR/taskshoot-attachments-<uid>/<KEY>-<N>/` unless `--out-dir` is given. The API redirects
+the download to a signed object-storage URL on another host, so a sandboxed agent needs
+that host in its network allowlist too.
+
+```bash
 taskshoot task log-time DEV-12 --minutes 90 --note "review"  # log time (--date YYYY-MM-DD, default today)
 ```
 

@@ -1923,9 +1923,10 @@ pub fn events(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
             }
         }
         for attachment in &event.attachments {
+            // The id is printed because `task attachments --id` takes it.
             println!(
-                "  attachment: {} ({} bytes)",
-                attachment.filename, attachment.file_size
+                "  attachment: {} ({} bytes) {}",
+                attachment.filename, attachment.file_size, attachment.id
             );
         }
         if !event.reactions.is_empty() {
@@ -1948,6 +1949,251 @@ pub fn events(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> R
         }
         println!();
     }
+    Ok(())
+}
+
+/// One attachment together with the message it was posted in.
+struct ThreadAttachment {
+    event_id: String,
+    created_at: String,
+    author: String,
+    attachment: crate::models::Attachment,
+}
+
+fn thread_attachments(events: Vec<TaskEvent>) -> Vec<ThreadAttachment> {
+    events
+        .into_iter()
+        .flat_map(|event| {
+            let author = author_name(&event.author);
+            let event_id = event.id;
+            let created_at = event.created_at;
+            event
+                .attachments
+                .into_iter()
+                .map(move |attachment| ThreadAttachment {
+                    event_id: event_id.clone(),
+                    created_at: created_at.clone(),
+                    author: author.clone(),
+                    attachment,
+                })
+        })
+        .collect()
+}
+
+/// A file name that is safe to join onto the output directory: the server
+/// hands back whatever name the uploader's browser sent, which may carry path
+/// separators or `..`.
+fn safe_file_name(attachment_id: &str, filename: &str) -> String {
+    let base = filename.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned = sanitize_path_component(base);
+    let cleaned = cleaned.trim().trim_start_matches('.');
+    // The id prefix keeps two uploads named `image.png` apart. Most file
+    // systems cap a name at 255 bytes, and a UUID plus a long Japanese name
+    // can pass that, so the name is cut on a char boundary, keeping the
+    // extension (readers pick the decoder from it).
+    const MAX_NAME_BYTES: usize = 200;
+    let name = if cleaned.is_empty() { "file" } else { cleaned };
+    let (stem, ext) = match name.rfind('.') {
+        Some(dot) if dot > 0 && name.len() - dot <= 16 => (&name[..dot], &name[dot..]),
+        _ => (name, ""),
+    };
+    let budget = MAX_NAME_BYTES.saturating_sub(ext.len());
+    let mut cut = stem.len().min(budget);
+    while !stem.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{attachment_id}-{}{ext}", &stem[..cut])
+}
+
+fn sanitize_path_component(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// The temp dir rather than the cwd: agents run in sandboxes where the temp
+/// dir is the place they are sure to be allowed to write. On Linux that is the
+/// world-writable `/tmp`, where another user could pre-create the directory
+/// and plant symlinks or swap in files the agent then reads. So the root is
+/// per-user, created 0700, and refused unless it is a real directory owned by
+/// us that nobody else can enter.
+fn private_attachment_root(temp_dir: &std::path::Path) -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        let root = temp_dir.join(format!("taskshoot-attachments-{uid}"));
+        match std::fs::DirBuilder::new().mode(0o700).create(&root) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("cannot create {}", root.display()))
+            }
+        }
+        let meta = std::fs::symlink_metadata(&root)
+            .with_context(|| format!("cannot stat {}", root.display()))?;
+        if !meta.file_type().is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+            bail!(
+                "{} is not a private directory owned by you (uid {uid}, mode 0700); \
+                 remove it or pass --out-dir",
+                root.display()
+            );
+        }
+        Ok(root)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows' temp dir is under the user profile, not shared.
+        Ok(temp_dir.join("taskshoot-attachments"))
+    }
+}
+
+fn create_private_dir_all(dir: &std::path::Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .with_context(|| format!("cannot create {}", dir.display()))
+}
+
+/// O_EXCL, so an existing file or symlink at the path is never written through.
+fn create_new_private_file(path: &std::path::Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .with_context(|| format!("cannot create {}", path.display()))
+}
+
+pub fn attachments(
+    api: &Api,
+    task_arg: &str,
+    project: Option<&str>,
+    download: bool,
+    ids: &[String],
+    out_dir: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    let (project, task_ref) = resolve_target(task_arg, project)?;
+    let events: Vec<TaskEvent> = from_value(api.events(&project, &task_ref)?)?;
+    let mut items = thread_attachments(events);
+    if !ids.is_empty() {
+        for id in ids {
+            if !items.iter().any(|item| &item.attachment.id == id) {
+                bail!("attachment {id} is not in the thread of {task_arg}");
+            }
+        }
+        items.retain(|item| ids.contains(&item.attachment.id));
+    }
+
+    let mut saved: Vec<Option<PathBuf>> = vec![None; items.len()];
+    if download && !items.is_empty() {
+        let dir = match out_dir {
+            Some(dir) => PathBuf::from(dir),
+            None => private_attachment_root(&std::env::temp_dir())?
+                .join(sanitize_path_component(&format!("{project}-{task_ref}"))),
+        };
+        create_private_dir_all(&dir)?;
+        for (item, slot) in items.iter().zip(saved.iter_mut()) {
+            let id = &item.attachment.id;
+            if Uuid::parse_str(id).is_err() {
+                bail!(
+                    "attachment {} has no usable id (the server is too old to download from)",
+                    item.attachment.filename
+                );
+            }
+            let path = dir.join(safe_file_name(id, &item.attachment.filename));
+            // Written beside the target and renamed, so an interrupted
+            // download never leaves a truncated file under the real name.
+            // The pid keeps two agents fetching the same attachment at once
+            // (the agent loop and the mention responder run as one user) from
+            // deleting or publishing each other's half-written file.
+            let mut partial = path.clone().into_os_string();
+            partial.push(format!(".{}.part", std::process::id()));
+            let partial = PathBuf::from(partial);
+            // Only a crashed earlier process with this same pid can have left
+            // this name; removing a symlink removes the link, not its target.
+            let _ = std::fs::remove_file(&partial);
+            let mut file = create_new_private_file(&partial)?;
+            let result = api.download_attachment(&project, &task_ref, id, &mut file);
+            drop(file);
+            if let Err(err) = result {
+                let _ = std::fs::remove_file(&partial);
+                return Err(err.context(format!("failed to download {}", item.attachment.filename)));
+            }
+            std::fs::rename(&partial, &path)
+                .with_context(|| format!("cannot move into {}", path.display()))?;
+            *slot = Some(path);
+        }
+    }
+
+    if json {
+        let rows: Vec<Value> = items
+            .iter()
+            .zip(&saved)
+            .map(|(item, path)| {
+                let mut row = json!({
+                    "id": item.attachment.id,
+                    "filename": item.attachment.filename,
+                    "content_type": item.attachment.content_type,
+                    "file_size": item.attachment.file_size,
+                    "event_id": item.event_id,
+                    "created_at": item.created_at,
+                    "author": item.author,
+                });
+                if let Some(path) = path {
+                    row["path"] = json!(path.display().to_string());
+                }
+                row
+            })
+            .collect();
+        return print_json(&Value::Array(rows));
+    }
+    if items.is_empty() {
+        println!("No attachments.");
+        return Ok(());
+    }
+    if download {
+        for path in saved.iter().flatten() {
+            println!("{}", path.display());
+        }
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|item| {
+            let time: String = item.created_at.chars().take(19).collect();
+            vec![
+                item.attachment.id.clone(),
+                truncate_width(&item.attachment.filename, 40),
+                item.attachment.content_type.clone(),
+                item.attachment.file_size.to_string(),
+                time.replace('T', " "),
+                item.author.clone(),
+            ]
+        })
+        .collect();
+    print_table(
+        &["ID", "FILENAME", "TYPE", "BYTES", "POSTED", "AUTHOR"],
+        &rows,
+    );
     Ok(())
 }
 
@@ -2275,6 +2521,109 @@ mod tests {
         assert!(match_priority("  ", &default_priorities()).is_err());
     }
     use super::*;
+
+    #[cfg(unix)]
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("taskshoot-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn root_name() -> String {
+        format!("taskshoot-attachments-{}", unsafe { libc::geteuid() })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_root_is_created_owner_only() {
+        use std::os::unix::fs::MetadataExt;
+        // Arrange
+        let base = scratch_dir("fresh");
+        // Act
+        let root = private_attachment_root(&base).unwrap();
+        // Assert
+        assert_eq!(std::fs::metadata(&root).unwrap().mode() & 0o777, 0o700);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_root_refuses_a_shared_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        // Arrange: someone left it world-writable (or pre-created it so)
+        let base = scratch_dir("shared");
+        let planted = base.join(root_name());
+        std::fs::create_dir(&planted).unwrap();
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777)).unwrap();
+        // Act
+        let result = private_attachment_root(&base);
+        // Assert
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_root_refuses_a_symlink() {
+        // Arrange: a 0700 dir elsewhere, reached through a planted link
+        let base = scratch_dir("link");
+        let elsewhere = base.join("elsewhere");
+        create_private_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, base.join(root_name())).unwrap();
+        // Act
+        let result = private_attachment_root(&base);
+        // Assert
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_private_file_does_not_write_through_a_symlink() {
+        // Arrange
+        let base = scratch_dir("part");
+        let victim = base.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let part = base.join("x.part");
+        std::os::unix::fs::symlink(&victim, &part).unwrap();
+        // Act
+        let result = create_new_private_file(&part);
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn safe_file_name_strips_path_parts() {
+        // Arrange
+        let id = "01a1d8cd-8cd8-7018-a905-6c6f016dd93f";
+        // Act / Assert
+        assert_eq!(safe_file_name(id, "image.png"), format!("{id}-image.png"));
+        assert_eq!(
+            safe_file_name(id, "../../etc/passwd"),
+            format!("{id}-passwd")
+        );
+        assert_eq!(safe_file_name(id, "a\\b\\c.txt"), format!("{id}-c.txt"));
+        assert_eq!(safe_file_name(id, ".."), format!("{id}-file"));
+        assert_eq!(safe_file_name(id, ""), format!("{id}-file"));
+        assert_eq!(safe_file_name(id, "a:b?.jpg"), format!("{id}-a_b_.jpg"));
+    }
+
+    #[test]
+    fn safe_file_name_caps_length_and_keeps_extension() {
+        // Arrange
+        let long = format!("{}.jpg", "日".repeat(200));
+        // Act
+        let name = safe_file_name("id", &long);
+        // Assert
+        assert!(name.len() <= 255, "{} bytes", name.len());
+        assert!(name.ends_with(".jpg"));
+        assert!(name.starts_with("id-日"));
+    }
 
     fn search_result(category: Option<&str>) -> SearchResult {
         from_value(json!({

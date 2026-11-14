@@ -149,7 +149,11 @@ taskshoot task comment "$REF" "Bot is starting on this task." --json
 ```bash
 taskshoot task show "$REF"
 taskshoot task events "$REF"
+taskshoot task attachments "$REF" --download   # when the thread has attachments; prints local paths
 ```
+
+- Screenshots and documents posted in the thread are part of the request. Download them
+  and open the printed paths instead of reporting them as unreadable.
 
 - Read the task body and thread, then do the work in the relevant repository (implement,
   test, review).

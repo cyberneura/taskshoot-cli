@@ -228,7 +228,10 @@ taskshoot task claim DEV-12                     # assignee=me + move to in-progr
 taskshoot task claim DEV-12 --if-unassigned     # claim only if unassigned (409 if already taken)
 taskshoot task complete DEV-12 --comment "Done"     # move to the terminal stage
 taskshoot task comment DEV-12 "progress update" --file ./screenshot.png
-taskshoot task events DEV-12                     # show the thread (prints message ids)
+taskshoot task events DEV-12                     # show the thread (prints message and attachment ids)
+taskshoot task attachments DEV-12                # list the files attached in the thread
+taskshoot task attachments DEV-12 --download     # save them under $TMPDIR/taskshoot-attachments-<uid>/DEV-12/, print the paths
+taskshoot task attachments DEV-12 --id <attachment-id> --out-dir ./files  # just one, into ./files
 taskshoot task log-time DEV-12 --minutes 90 --note "review"  # log time (--date YYYY-MM-DD, default today)
 taskshoot task track <uuid> --project DEV        # untracked -> tracked (assigns a number)
 taskshoot task cancel DEV-12 --reason "duplicate"
