@@ -482,6 +482,26 @@ enum TaskCmd {
         #[arg(long)]
         project: Option<String>,
     },
+    /// List the files attached in the task thread, or download them
+    ///
+    /// --download saves them and prints each local path (one per line), so an
+    /// agent can open an image with its own file reader. Without --out-dir the
+    /// files go under a private per-user dir in the temp dir ($TMPDIR/taskshoot-attachments-<uid>/<KEY>-<N>/).
+    Attachments {
+        task: String,
+        #[arg(long)]
+        project: Option<String>,
+        /// Download the attachments instead of only listing them
+        #[arg(long)]
+        download: bool,
+        /// Only these attachments (repeatable; ids from the listing or `task events`)
+        #[arg(long = "id")]
+        ids: Vec<String>,
+        /// Directory to save into (created if missing). Implies --download.
+        /// Used as given: do not point it at a directory other users can write to
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
     /// Add or remove an emoji reaction on a message in the thread
     #[command(subcommand)]
     Reaction(ReactionCmd),
@@ -768,6 +788,21 @@ fn run() -> Result<()> {
             TaskCmd::Events { task, project } => {
                 commands::events(&api, &task, project.as_deref(), json)
             }
+            TaskCmd::Attachments {
+                task,
+                project,
+                download,
+                ids,
+                out_dir,
+            } => commands::attachments(
+                &api,
+                &task,
+                project.as_deref(),
+                download || out_dir.is_some(),
+                &ids,
+                out_dir.as_deref(),
+                json,
+            ),
             TaskCmd::Reaction(cmd) => match cmd {
                 ReactionCmd::Add {
                     task,
@@ -1330,6 +1365,40 @@ mod tests {
             ]),
             "eyes"
         );
+    }
+
+    #[test]
+    fn attachments_takes_repeated_ids_and_out_dir() {
+        match Cli::try_parse_from([
+            "taskshoot",
+            "task",
+            "attachments",
+            "DEV-1",
+            "--id",
+            "a",
+            "--id",
+            "b",
+            "--out-dir",
+            "/tmp/x",
+        ])
+        .expect("should parse")
+        .command
+        {
+            Cmd::Task(boxed) => match *boxed {
+                TaskCmd::Attachments {
+                    ids,
+                    out_dir,
+                    download,
+                    ..
+                } => {
+                    assert_eq!(ids, vec!["a", "b"]);
+                    assert_eq!(out_dir, Some(PathBuf::from("/tmp/x")));
+                    assert!(!download);
+                }
+                _ => panic!("expected the attachments command"),
+            },
+            _ => panic!("expected a task command"),
+        }
     }
 
     #[test]

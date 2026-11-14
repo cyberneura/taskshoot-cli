@@ -220,7 +220,13 @@ pub struct ReactionEmoji {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Attachment {
+    /// `#[serde(default)]` so an older server that omits it still parses;
+    /// such an attachment is listed but cannot be downloaded.
+    #[serde(default)]
+    pub id: String,
     pub filename: String,
+    #[serde(default)]
+    pub content_type: String,
     #[serde(default)]
     pub file_size: i64,
 }
