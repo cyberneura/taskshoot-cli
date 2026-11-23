@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::api::{from_value, Api, TasksQuery};
 use crate::models::{
     AssignableUser, Me, MentionCandidate, NotificationList, Org, OrgUser, PriorityOption, Project,
-    ReactionEmoji, SearchResult, Task, TaskCategory, TaskEvent, Workflow,
+    ReactionEmoji, SearchResult, Task, TaskCategory, TaskEvent, TaskTemplate, Workflow,
 };
 use crate::output::{print_table, truncate_width};
 use crate::stages;
@@ -1578,6 +1578,106 @@ pub struct CreateArgs {
     pub due_date: Option<String>,
     pub labels: Vec<String>,
     pub category: Option<String>,
+    /// Task template name (see [`apply_template`]).
+    pub template: Option<String>,
+}
+
+/// Find a task template by name, ignoring surrounding spaces and case (the same
+/// matching as the web app's `?new&template=<name>`). The server keeps names
+/// unique ignoring case, but more than one match is still reported rather than
+/// silently picking the first.
+fn find_template<'a>(templates: &'a [TaskTemplate], name: &str) -> Result<&'a TaskTemplate> {
+    let needle = name.trim().to_lowercase();
+    let matches: Vec<&TaskTemplate> = if needle.is_empty() {
+        Vec::new()
+    } else {
+        templates
+            .iter()
+            .filter(|t| t.name.trim().to_lowercase() == needle)
+            .collect()
+    };
+    match matches.as_slice() {
+        [one] => Ok(one),
+        [] => bail!(
+            "unknown template '{}' in this project; available: {}",
+            name.trim(),
+            templates
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => bail!(
+            "template name '{}' is ambiguous in this project",
+            name.trim()
+        ),
+    }
+}
+
+/// The server's `Task.title` max_length.
+const TITLE_MAX_CHARS: usize = 500;
+
+/// Prepend `prefix` unless `title` already starts with it (also when only the
+/// prefix's trailing spaces are missing, e.g. "[Bug]Login"). Returns `None`
+/// when the prefixed title would exceed the server's limit (the server would
+/// cut it off silently), so the caller keeps the title as given.
+fn with_title_prefix(title: &str, prefix: &str) -> Option<String> {
+    let trimmed = prefix.trim_end();
+    if prefix.is_empty()
+        || title.starts_with(prefix)
+        || (!trimmed.is_empty() && title.starts_with(trimmed))
+    {
+        return Some(title.to_string());
+    }
+    if prefix.chars().count() + title.chars().count() > TITLE_MAX_CHARS {
+        return None;
+    }
+    Some(format!("{prefix}{title}"))
+}
+
+/// The values of a new task after applying a template. Same rules as the web
+/// app (`frontend/src/lib/utils/taskTemplate.ts` in cyberneura/taskshoot): the
+/// name prefix and labels are added, the details and category are used only when
+/// not given explicitly (explicit flags win).
+struct TemplatedFields {
+    title: String,
+    description: Option<String>,
+    labels: Vec<String>,
+    /// The template's category id, used only when --category was not given.
+    category_id: Option<String>,
+}
+
+fn apply_template(
+    template: &TaskTemplate,
+    title: &str,
+    description: Option<&String>,
+    labels: &[String],
+    category_given: bool,
+) -> TemplatedFields {
+    let mut merged = labels.to_vec();
+    for label in &template.labels {
+        if !merged.contains(label) {
+            merged.push(label.clone());
+        }
+    }
+    let prefixed = with_title_prefix(title, &template.title_prefix);
+    if prefixed.is_none() {
+        eprintln!(
+            "warning: the template's name prefix was not added: the title would exceed {TITLE_MAX_CHARS} characters"
+        );
+    }
+    TemplatedFields {
+        title: prefixed.unwrap_or_else(|| title.to_string()),
+        description: description
+            .cloned()
+            .or_else(|| (!template.description.is_empty()).then(|| template.description.clone())),
+        labels: merged,
+        category_id: if category_given {
+            None
+        } else {
+            template.category_id.clone().filter(|id| !id.is_empty())
+        },
+    }
 }
 
 pub fn create(api: &Api, args: &CreateArgs, json: bool) -> Result<()> {
@@ -1596,9 +1696,32 @@ pub fn create(api: &Api, args: &CreateArgs, json: bool) -> Result<()> {
         .as_ref()
         .context("--title is required (or use --content for an untracked casual task)")?;
 
+    let templated = match &args.template {
+        Some(name) => {
+            let templates: Vec<TaskTemplate> = from_value(api.task_templates(&args.project)?)?;
+            let template = find_template(&templates, name)?;
+            Some(apply_template(
+                template,
+                title,
+                args.description.as_ref(),
+                &args.labels,
+                args.category.is_some(),
+            ))
+        }
+        None => None,
+    };
+    let title = templated
+        .as_ref()
+        .map_or(title.as_str(), |t| t.title.as_str());
+    let description = match &templated {
+        Some(t) => t.description.as_ref(),
+        None => args.description.as_ref(),
+    };
+    let labels = templated.as_ref().map_or(&args.labels, |t| &t.labels);
+
     let mut body = Map::new();
     body.insert("title".to_string(), json!(title));
-    if let Some(description) = &args.description {
+    if let Some(description) = description {
         body.insert("description".to_string(), json!(description));
     }
     if let Some(assignee) = &args.assignee {
@@ -1628,12 +1751,21 @@ pub fn create(api: &Api, args: &CreateArgs, json: bool) -> Result<()> {
     if let Some(due_date) = &args.due_date {
         body.insert("due_date".to_string(), json!(due_date));
     }
-    if !args.labels.is_empty() {
-        body.insert("labels".to_string(), json!(args.labels));
+    if !labels.is_empty() {
+        body.insert("labels".to_string(), json!(labels));
     }
     if let Some(category) = &args.category {
         if let Some(category_id) = resolve_category_id(api, &args.project, category)? {
             body.insert("category_id".to_string(), json!(category_id));
+        }
+    } else if let Some(category_id) = templated.as_ref().and_then(|t| t.category_id.as_ref()) {
+        // Same as the web app: a template's category that has since been
+        // deactivated (or deleted) is left out rather than set on a new task.
+        let categories: Vec<TaskCategory> = from_value(api.task_categories(&args.project)?)?;
+        if categories.iter().any(|c| c.active && &c.id == category_id) {
+            body.insert("category_id".to_string(), json!(category_id));
+        } else {
+            eprintln!("warning: the template's category is no longer active; created without it");
         }
     }
     let mut value = api.create_task_full(&args.project, &Value::Object(body))?;
@@ -2521,6 +2653,92 @@ mod tests {
         assert!(match_priority("  ", &default_priorities()).is_err());
     }
     use super::*;
+
+    fn template(
+        prefix: &str,
+        description: &str,
+        category: Option<&str>,
+        labels: &[&str],
+    ) -> TaskTemplate {
+        TaskTemplate {
+            name: "Bug report".to_string(),
+            title_prefix: prefix.to_string(),
+            description: description.to_string(),
+            category_id: category.map(str::to_string),
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn find_template_ignores_case_and_spaces() {
+        let templates = vec![template("", "", None, &[])];
+        assert!(find_template(&templates, "  bug REPORT ").is_ok());
+        assert!(find_template(&templates, "Feature")
+            .unwrap_err()
+            .to_string()
+            .contains("available: Bug report"));
+        assert!(find_template(&templates, "  ").is_err());
+        let mut twice = templates.clone();
+        twice.push(template("", "", None, &[]));
+        twice[1].name = "bug report".to_string();
+        assert!(find_template(&twice, "Bug Report")
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous"));
+    }
+
+    #[test]
+    fn with_title_prefix_adds_the_prefix_once() {
+        let p = |t: &str, x: &str| with_title_prefix(t, x).unwrap();
+        assert_eq!(p("Login fails", "[Bug] "), "[Bug] Login fails");
+        assert_eq!(p("[Bug] Login fails", "[Bug] "), "[Bug] Login fails");
+        assert_eq!(p("[Bug]Login", "[Bug] "), "[Bug]Login");
+        assert_eq!(p("x", ""), "x");
+    }
+
+    #[test]
+    fn with_title_prefix_refuses_to_exceed_the_limit() {
+        let long = "x".repeat(TITLE_MAX_CHARS - 3);
+        assert_eq!(with_title_prefix(&long, "[Bug] "), None);
+        let fits = "x".repeat(TITLE_MAX_CHARS - 6);
+        assert_eq!(
+            with_title_prefix(&fits, "[Bug] ").map(|t| t.chars().count()),
+            Some(TITLE_MAX_CHARS)
+        );
+    }
+
+    #[test]
+    fn apply_template_fills_what_was_not_given() {
+        let t = template("[Bug] ", "## Steps", Some("cat-1"), &["bug", "triage"]);
+        let out = apply_template(
+            &t,
+            "Login fails",
+            None,
+            &["mine".to_string(), "bug".to_string()],
+            false,
+        );
+        assert_eq!(out.title, "[Bug] Login fails");
+        assert_eq!(out.description.as_deref(), Some("## Steps"));
+        assert_eq!(out.labels, vec!["mine", "bug", "triage"]);
+        assert_eq!(out.category_id.as_deref(), Some("cat-1"));
+    }
+
+    #[test]
+    fn apply_template_lets_explicit_flags_win() {
+        let t = template("", "## Steps", Some("cat-1"), &[]);
+        let given = "explicit".to_string();
+        let out = apply_template(&t, "T", Some(&given), &[], true);
+        assert_eq!(out.description.as_deref(), Some("explicit"));
+        assert_eq!(out.category_id, None);
+    }
+
+    #[test]
+    fn apply_template_leaves_empty_template_fields_out() {
+        let t = template("", "", Some(""), &[]);
+        let out = apply_template(&t, "T", None, &[], false);
+        assert_eq!(out.description, None);
+        assert_eq!(out.category_id, None);
+    }
 
     #[cfg(unix)]
     fn scratch_dir(name: &str) -> PathBuf {

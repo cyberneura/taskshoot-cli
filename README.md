@@ -219,6 +219,7 @@ taskshoot search deploy --category bug          # narrow to a category (name or 
 taskshoot task show DEV-12
 taskshoot task create --project DEV --title "New feature" --description "..." --assignee me
 taskshoot task create --project DEV --content "a casual note"   # untracked (no number)
+taskshoot task create --project DEV --title "Login fails" --template "Bug report"   # start from a task template
 taskshoot task update DEV-12 --status in-progress --progress 50
 taskshoot task update DEV-12 --bot-ready true  # bot-ready flag (change is logged)
 taskshoot task update DEV-12 --category Dev    # set category (name or id; "" clears it)
@@ -441,6 +442,11 @@ done
   List them with `taskshoot priorities --project <KEY>`; an unknown label fails with the list.
 - `--category` (task create / update) takes a category name (case-insensitive) or id. List
   them with `taskshoot categories --project <KEY>`. `task update --category ""` clears it.
+- `--template` (task create) starts from a task template of the project, picked by name
+  (case-insensitive; templates are managed in the project settings of the web app). The
+  template's name prefix is added to `--title` unless it already starts with it, its labels are
+  added to `--label`, and its details / category are used only when `--description` /
+  `--category` are not given. An unknown name fails with the list of templates.
 - `category create` / `category update` manage the categories themselves and **require the
   manager role or higher** (member returns `403 manager role required`). `category update`
   takes a name (case-insensitive) or id as its positional argument, and needs at least one

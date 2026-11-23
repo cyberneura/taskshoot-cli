@@ -355,6 +355,11 @@ impl Api {
         self.get(&self.project_path(project, "priority-options/")?)
     }
 
+    /// Task templates of a project (readable by every member).
+    pub fn task_templates(&self, project: &str) -> Result<Value> {
+        self.get(&self.project_path(project, "task-templates/")?)
+    }
+
     pub fn task_categories(&self, project: &str) -> Result<Value> {
         self.get(&self.project_path(project, "task-categories/")?)
     }
