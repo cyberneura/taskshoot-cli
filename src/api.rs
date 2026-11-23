@@ -36,6 +36,9 @@ pub struct TasksQuery {
     /// category filter. Ids rather than names, because a category name is
     /// only unique within a project.
     pub category_ids: Vec<String>,
+    /// Labels to match (exact). Multiple values are OR'd. Empty means no
+    /// label filter.
+    pub labels: Vec<String>,
 }
 
 pub struct Api {
@@ -162,6 +165,9 @@ impl Api {
         }
         for category_id in &query.category_ids {
             path.push_str(&format!("&category_id={}", enc(category_id)));
+        }
+        for label in &query.labels {
+            path.push_str(&format!("&label={}", enc(label)));
         }
         self.get(&path)
     }

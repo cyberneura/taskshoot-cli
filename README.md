@@ -208,6 +208,7 @@ taskshoot tasks --project DEV --untracked      # casual tasks only
 taskshoot tasks --project DEV --tracked        # numbered tasks only
 taskshoot tasks --project DEV --category bug   # only this category (name or id)
 taskshoot tasks --project DEV --category bug,chore          # multiple values are OR'd
+taskshoot tasks --project DEV --label frontend --label design  # labels: exact match, repeat to OR
 taskshoot tasks --project DEV --bot-ready true # only tasks a bot may pick up
 taskshoot tasks --project DEV --bot-ready true --count         # just how many matched (prints "3")
 taskshoot tasks --bot-ready true --count --json                # {"count": 3}
