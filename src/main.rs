@@ -127,6 +127,12 @@ enum Cmd {
         /// a project defining none of the names is skipped with a warning
         #[arg(long, value_delimiter = ',')]
         category: Vec<String>,
+        /// Filter by label (exact match; server-side). Repeatable, not
+        /// comma-separated -- like `task create/update --label`, a label may
+        /// contain a comma. Multiple values are OR'd and the result is AND'd
+        /// with the other filters (e.g. --label frontend --label design)
+        #[arg(long)]
+        label: Vec<String>,
         /// Also sweep archived projects, which are skipped by default. Rejected
         /// together with --project, which always lists the project it names,
         /// archived or not
@@ -134,7 +140,7 @@ enum Cmd {
         include_archived_projects: bool,
         /// Max tasks returned per project and per request (1-500; default 200,
         /// or 500 when a status, phase, assignee, mentioned,
-        /// mentioned-or-assignee or bot-ready filter is used)
+        /// mentioned-or-assignee, bot-ready, category or label filter is used)
         #[arg(long)]
         limit: Option<u32>,
         /// Print only how many tasks matched, instead of the list. Prints the
@@ -641,6 +647,7 @@ fn run() -> Result<()> {
             tracked,
             bot_ready,
             category,
+            label,
             include_archived_projects,
             limit,
             count,
@@ -661,6 +668,7 @@ fn run() -> Result<()> {
                 tracked,
                 bot_ready,
                 category,
+                label,
                 limit,
             },
             // json and count are both output modes; a struct keeps them from

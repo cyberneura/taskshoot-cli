@@ -103,6 +103,7 @@ taskshoot tasks --project DEV --exclude-status done                # exclude a s
 taskshoot tasks --project DEV --exclude-phase done,invalid,rejected,cancelled  # drop terminal tasks
 taskshoot tasks --project DEV --category bug                        # only this category (name or id)
 taskshoot tasks --project DEV --category bug,chore                 # multiple values are OR'd
+taskshoot tasks --project DEV --label frontend --label design      # labels (exact match), repeat to OR
 taskshoot tasks --project DEV --mentioned me    # tasks that @-mention you
 taskshoot tasks --project DEV --mentioned-or-assignee me   # assigned to you OR @-mentioning you
 taskshoot tasks --project DEV --bot-ready true  # only tasks a bot may pick up
@@ -315,6 +316,11 @@ taskshoot listen --no-state                      # do not persist the cursor at 
   none of the names is skipped with a warning, while naming the project makes it an error.
   A UUID is passed through as given. `taskshoot search --category ...` works the same way,
   except that a name there matches that category in *every* project that defines it.
+- **`--label <name>`** narrows to tasks carrying that label (exact match after trimming).
+  Repeat the flag for multiple values (not comma-separated: a label may contain a comma,
+  same as `task create/update --label`), OR'd, AND'd with the other filters, and is server-side, so it applies before `--limit`. An empty value is an error.
+  The CLI filters the result again by the `labels` field, so a server that predates the
+  `label` parameter returns only matching tasks (its `--limit` window is then taken first).
 - **`--mentioned <user>`** narrows to tasks whose description or a comment @-mentions that
   user. Give `me`, a handle name, a display name, or a user id. Mentions of groups the
   user belongs to are included.
