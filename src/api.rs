@@ -38,6 +38,9 @@ pub struct TasksQuery {
     pub category_ids: Vec<String>,
     /// Drop tasks that have an open blocker (blocked by).
     pub exclude_blocked: bool,
+    /// Labels to match (exact). Multiple values are OR'd. Empty means no
+    /// label filter.
+    pub labels: Vec<String>,
 }
 
 pub struct Api {
@@ -164,6 +167,9 @@ impl Api {
         }
         for category_id in &query.category_ids {
             path.push_str(&format!("&category_id={}", enc(category_id)));
+        }
+        for label in &query.labels {
+            path.push_str(&format!("&label={}", enc(label)));
         }
         if query.exclude_blocked {
             path.push_str("&exclude_blocked=true");

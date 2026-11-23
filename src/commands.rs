@@ -626,6 +626,9 @@ pub struct TasksFilter {
     /// Category names or ids. Multiple values are OR'd; empty means no
     /// category filter.
     pub category: Vec<String>,
+    /// Labels (exact match). Multiple values are OR'd; empty means no label
+    /// filter.
+    pub label: Vec<String>,
     pub exclude_status: Vec<String>,
     pub exclude_phase: Vec<String>,
     pub assignee: Option<String>,
@@ -659,6 +662,35 @@ fn resolve_phase(input: &str) -> Result<&'static str> {
              acceptance/done/rejected/cancelled/invalid)"
         ),
     }
+}
+
+/// Trim and dedupe `--label` values (the server trims them the same way). An
+/// empty value is rejected rather than dropped: `--label ''` would otherwise
+/// silently widen the listing to every task.
+fn normalize_labels(inputs: &[String]) -> Result<Vec<String>> {
+    let mut labels: Vec<String> = Vec::new();
+    for input in inputs {
+        let label = input.trim();
+        if label.is_empty() {
+            bail!("empty label value (check for a stray comma)");
+        }
+        if !labels.iter().any(|l| l == label) {
+            labels.push(label.to_string());
+        }
+    }
+    Ok(labels)
+}
+
+/// Whether the task JSON carries at least one of `labels`. Stored labels are
+/// compared as is, the same as the server, so the result does not depend on
+/// whether the server applied the filter.
+fn task_has_any_label(task: &Value, labels: &[String]) -> bool {
+    task["labels"].as_array().is_some_and(|values| {
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|value| labels.iter().any(|l| l == value))
+    })
 }
 
 /// Resolve multiple phase specs into a list of english values (deduped).
@@ -1118,6 +1150,8 @@ struct UserFilters<'a> {
 struct ProjectTasksQuery<'a> {
     tracked: Option<bool>,
     exclude_phase: &'a [String],
+    /// Normalized --label values (see `normalize_labels`).
+    labels: &'a [String],
     /// Requests to run per project, OR'd together. Normally one; two when
     /// --mentioned-or-assignee is given.
     user_filters: &'a [UserFilters<'a>],
@@ -1175,6 +1209,7 @@ fn project_tasks(
         || !shared.exclude_phase.is_empty()
         || has_user_filter
         || !category_ids.is_empty()
+        || !shared.labels.is_empty()
         || filter.bot_ready.is_some();
     // exclude drops by numeric value on the server, so tasks with a different
     // label sharing that value are swept in too. The client cannot restore them
@@ -1209,6 +1244,7 @@ fn project_tasks(
                 bot_ready: filter.bot_ready,
                 category_ids: category_ids.clone(),
                 exclude_blocked: filter.exclude_blocked,
+                labels: shared.labels.to_vec(),
             },
         )?;
         let mut page: Vec<Value> = from_value(value)?;
@@ -1233,7 +1269,14 @@ fn project_tasks(
              raise --limit (max 500) if you need more"
         );
     }
-    // When labels are given, re-filter by exact label match: the server can only
+    // The label filter is applied again here: a server that predates the
+    // `label` parameter ignores it and returns every task, and a bot loop that
+    // narrows its work with --label must not pick up the rest. (Against such a
+    // server the --limit window is taken before this filter.)
+    if !shared.labels.is_empty() {
+        items.retain(|t| task_has_any_label(t, shared.labels));
+    }
+    // When status labels are given, re-filter by exact label match: the server can only
     // filter by number, so if another workflow uses the same value with a
     // different label, those tasks get mixed in. The portion specified directly by
     // number is kept regardless of label (supports mixing labels and numbers).
@@ -1266,6 +1309,7 @@ pub fn tasks(
         None
     };
     let exclude_phase = resolve_phases(&filter.exclude_phase)?;
+    let labels = normalize_labels(&filter.label)?;
     // A user id is organization-wide, so it is resolved once and reused for
     // every project (a status label is not: see the per-project loop below)
     let assignee_id = match &filter.assignee {
@@ -1314,6 +1358,7 @@ pub fn tasks(
             &ProjectTasksQuery {
                 tracked,
                 exclude_phase: &exclude_phase,
+                labels: &labels,
                 user_filters: &user_filters,
                 strictness: if selection.implicit {
                     LabelStrictness::Lenient
@@ -2557,6 +2602,45 @@ pub fn notifications_read(api: &Api, ids: &[String], all: bool, json: bool) -> R
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normalize_labels_trims_and_dedupes() {
+        let inputs = vec![
+            " frontend ".to_string(),
+            "design".to_string(),
+            "frontend".to_string(),
+        ];
+        assert_eq!(
+            normalize_labels(&inputs).unwrap(),
+            vec!["frontend", "design"]
+        );
+        assert!(normalize_labels(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn normalize_labels_rejects_an_empty_value() {
+        // A stray comma must not silently turn the filter off
+        let inputs = vec!["frontend".to_string(), " ".to_string()];
+        assert!(normalize_labels(&inputs).is_err());
+    }
+
+    #[test]
+    fn task_has_any_label_is_an_exact_or_match() {
+        let labels = vec!["frontend".to_string(), "design".to_string()];
+        assert!(task_has_any_label(
+            &json!({"labels": ["backend", "design"]}),
+            &labels
+        ));
+        assert!(!task_has_any_label(&json!({"labels": ["front"]}), &labels));
+        assert!(!task_has_any_label(&json!({"labels": []}), &labels));
+        // Stored values are not trimmed (same as the server)
+        assert!(!task_has_any_label(
+            &json!({"labels": [" design "]}),
+            &labels
+        ));
+        // An older server or a payload without the field matches nothing
+        assert!(!task_has_any_label(&json!({}), &labels));
+    }
+
     #[test]
     fn format_minutes_matches_the_web_ui() {
         assert_eq!(format_minutes(0), "0m");
