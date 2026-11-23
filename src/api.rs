@@ -36,6 +36,8 @@ pub struct TasksQuery {
     /// category filter. Ids rather than names, because a category name is
     /// only unique within a project.
     pub category_ids: Vec<String>,
+    /// Drop tasks that have an open blocker (blocked by).
+    pub exclude_blocked: bool,
 }
 
 pub struct Api {
@@ -162,6 +164,9 @@ impl Api {
         }
         for category_id in &query.category_ids {
             path.push_str(&format!("&category_id={}", enc(category_id)));
+        }
+        if query.exclude_blocked {
+            path.push_str("&exclude_blocked=true");
         }
         self.get(&path)
     }
@@ -339,6 +344,20 @@ impl Api {
             &self.task_path(project, task_ref, "/cancel")?,
             &json!({ "reason": reason }),
         )
+    }
+
+    /// Mark the task as blocked by `blocker` (`KEY-N`, any project of the
+    /// organization). Idempotent. Self-reference, cycles and untracked tasks are 400.
+    pub fn add_blocker(&self, project: &str, task_ref: &str, blocker: &str) -> Result<Value> {
+        self.post(
+            &self.task_path(project, task_ref, "/blocked-by/")?,
+            &json!({ "blocker": blocker }),
+        )
+    }
+
+    /// Remove a blocked-by relation. Idempotent.
+    pub fn remove_blocker(&self, project: &str, task_ref: &str, blocker: &str) -> Result<Value> {
+        self.delete(&self.task_path(project, task_ref, &format!("/blocked-by/{}", enc(blocker)))?)
     }
 
     pub fn resume(&self, project: &str, task_ref: &str) -> Result<Value> {

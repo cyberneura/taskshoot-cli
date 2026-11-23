@@ -120,6 +120,11 @@ enum Cmd {
         /// Filter by Bot Ready flag (true/false); bot loops use --bot-ready true
         #[arg(long)]
         bot_ready: Option<bool>,
+        /// Drop tasks that are blocked by a task that is not closed yet
+        /// (server-side). Bot loops use it with --bot-ready true, so a task
+        /// whose prerequisite is unfinished is not picked up
+        #[arg(long)]
+        exclude_blocked: bool,
         /// Filter by category: name (case-insensitive) or id (server-side).
         /// Repeatable and comma-separated; multiple values are OR'd
         /// (e.g. --category bug,chore). A name is resolved per project, since
@@ -511,6 +516,26 @@ enum TaskCmd {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Mark a task as blocked by another task (it cannot start until the
+    /// blocker is closed). The blocker may be in another project of the
+    /// organization. Idempotent; cycles and self-references are rejected
+    Block {
+        task: String,
+        /// The blocking task (KEY-<number>)
+        #[arg(long)]
+        by: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Remove a blocked-by relation added with `task block`. Idempotent
+    Unblock {
+        task: String,
+        /// The blocking task (KEY-<number>)
+        #[arg(long)]
+        by: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Cancel a task
     Cancel {
         task: String,
@@ -640,6 +665,7 @@ fn run() -> Result<()> {
             untracked,
             tracked,
             bot_ready,
+            exclude_blocked,
             category,
             include_archived_projects,
             limit,
@@ -660,6 +686,7 @@ fn run() -> Result<()> {
                 untracked,
                 tracked,
                 bot_ready,
+                exclude_blocked,
                 category,
                 limit,
             },
@@ -822,6 +849,12 @@ fn run() -> Result<()> {
             },
             TaskCmd::Track { task, project } => {
                 commands::track(&api, &task, project.as_deref(), json)
+            }
+            TaskCmd::Block { task, by, project } => {
+                commands::block(&api, &task, project.as_deref(), &by, json)
+            }
+            TaskCmd::Unblock { task, by, project } => {
+                commands::unblock(&api, &task, project.as_deref(), &by, json)
             }
             TaskCmd::Cancel {
                 task,
@@ -1219,6 +1252,40 @@ mod tests {
                 assert_eq!(bot_ready, Some(true));
             }
             _ => panic!("expected the tasks command"),
+        }
+    }
+
+    #[test]
+    fn tasks_exclude_blocked_flag_parses() {
+        let args = [
+            "taskshoot",
+            "tasks",
+            "--bot-ready",
+            "true",
+            "--exclude-blocked",
+        ];
+        match Cli::try_parse_from(args).expect("should parse").command {
+            Cmd::Tasks {
+                exclude_blocked, ..
+            } => assert!(exclude_blocked),
+            _ => panic!("expected the tasks command"),
+        }
+    }
+
+    #[test]
+    fn task_block_requires_by() {
+        assert!(Cli::try_parse_from(["taskshoot", "task", "block", "DEV-2"]).is_err());
+        let cli = Cli::try_parse_from(["taskshoot", "task", "block", "DEV-2", "--by", "OPS-1"])
+            .expect("should parse");
+        match cli.command {
+            Cmd::Task(cmd) => match *cmd {
+                TaskCmd::Block { task, by, .. } => {
+                    assert_eq!(task, "DEV-2");
+                    assert_eq!(by, "OPS-1");
+                }
+                _ => panic!("expected task block"),
+            },
+            _ => panic!("expected the task command"),
         }
     }
 

@@ -211,6 +211,7 @@ taskshoot tasks --project DEV --category bug,chore          # multiple values ar
 taskshoot tasks --project DEV --bot-ready true # only tasks a bot may pick up
 taskshoot tasks --project DEV --bot-ready true --count         # just how many matched (prints "3")
 taskshoot tasks --bot-ready true --count --json                # {"count": 3}
+taskshoot tasks --project DEV --bot-ready true --exclude-blocked  # drop tasks whose blocker is not closed yet
 
 taskshoot search "search index"                # org-wide task search (--limit 1-50)
 taskshoot search DEV-12                         # a KEY-number reference matches directly
@@ -234,6 +235,8 @@ taskshoot task attachments DEV-12 --download     # save them under $TMPDIR/tasks
 taskshoot task attachments DEV-12 --id <attachment-id> --out-dir ./files  # just one, into ./files
 taskshoot task log-time DEV-12 --minutes 90 --note "review"  # log time (--date YYYY-MM-DD, default today)
 taskshoot task track <uuid> --project DEV        # untracked -> tracked (assigns a number)
+taskshoot task block DEV-12 --by OPS-3           # DEV-12 cannot start until OPS-3 closes (any project of the org)
+taskshoot task unblock DEV-12 --by OPS-3         # remove the relation (both are idempotent)
 taskshoot task cancel DEV-12 --reason "duplicate"
 taskshoot task resume DEV-12
 taskshoot task activity DEV-12                   # who is shown as typing / working right now

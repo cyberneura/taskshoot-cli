@@ -83,7 +83,33 @@ pub struct Task {
     /// Total time logged (minutes). Absent on servers older than the time-tracking API.
     #[serde(default)]
     pub time_logged_minutes: u64,
+    /// Tasks that must close before this one can start. Absent on servers
+    /// older than the blocked-by API.
+    #[serde(default)]
+    pub blocked_by: Vec<DependencyRef>,
+    /// Whether any blocker is still open (derived server-side; independent of bot_ready).
+    #[serde(default)]
+    pub is_blocked: bool,
     pub created_at: String,
+}
+
+/// The other side of a blocked-by relation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DependencyRef {
+    pub project_key: String,
+    pub number: Option<u64>,
+    pub title: String,
+    #[serde(default)]
+    pub closed: bool,
+}
+
+impl DependencyRef {
+    pub fn display_ref(&self) -> String {
+        match self.number {
+            Some(number) => format!("{}-{}", self.project_key, number),
+            None => self.project_key.clone(),
+        }
+    }
 }
 
 impl Task {

@@ -109,12 +109,15 @@ taskshoot tasks --project DEV --bot-ready true  # only tasks a bot may pick up
 taskshoot tasks --project DEV --untracked       # casual (numberless) tasks only
 taskshoot tasks --bot-ready true --count        # just the number of matches (prints "3")
 taskshoot tasks --bot-ready true --count --json # {"count": 3}
+taskshoot tasks --project DEV --bot-ready true --exclude-blocked  # drop tasks whose blocker is still open
 
 taskshoot search "search index"                 # org-wide task search (--limit 1-50)
 taskshoot search DEV-12                          # a KEY-number reference matches directly
 taskshoot search deploy --category bug           # narrow to a category (name or id)
 
-taskshoot task show DEV-12                       # details (bot_ready / assignee / phase / status)
+taskshoot task show DEV-12                       # details (bot_ready / assignee / phase / status / blocked by)
+taskshoot task block DEV-12 --by OPS-3           # DEV-12 waits until OPS-3 is closed (idempotent; cycles are 400)
+taskshoot task unblock DEV-12 --by OPS-3         # remove that relation (idempotent)
 taskshoot task events DEV-12                     # show the chat thread
 taskshoot task attachments DEV-12                # list the files attached in the thread
 taskshoot task attachments DEV-12 --download     # save them and print the local paths
@@ -352,7 +355,7 @@ taskshoot listen --no-state                      # do not persist the cursor at 
 ## Example AI-agent flow
 
 ```bash
-taskshoot tasks --project DEV --bot-ready true --status draft --json   # find pickable, unstarted tasks
+taskshoot tasks --project DEV --bot-ready true --status draft --exclude-blocked --json   # find pickable, unstarted tasks
 taskshoot task claim DEV-12 --if-unassigned --json     # claim it (avoids double-processing: 409 if taken)
 taskshoot task comment DEV-12 "Starting now" --json
 # ... development ...
