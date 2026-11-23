@@ -354,7 +354,7 @@ enum TaskCmd {
         title: Option<String>,
         /// Create an untracked casual task from this message instead
         /// (tracked-task options cannot be combined)
-        #[arg(long, conflicts_with_all = ["title", "description", "status", "assignee", "owner", "priority", "start_available_date", "due_date", "labels", "category"])]
+        #[arg(long, conflicts_with_all = ["title", "description", "status", "assignee", "owner", "priority", "start_available_date", "due_date", "labels", "category", "template"])]
         content: Option<String>,
         #[arg(long)]
         description: Option<String>,
@@ -384,6 +384,13 @@ enum TaskCmd {
         /// Category name or id (see `taskshoot categories`)
         #[arg(long)]
         category: Option<String>,
+        /// Start from a task template of the project (name, case-insensitive;
+        /// managed in the project settings). The template's name prefix is
+        /// added to --title unless it already starts with it, its labels are
+        /// added to --label, and its details / category are used only when
+        /// --description / --category are not given
+        #[arg(long)]
+        template: Option<String>,
     },
     /// Update task fields
     Update {
@@ -697,6 +704,7 @@ fn run() -> Result<()> {
                 due_date,
                 labels,
                 category,
+                template,
             } => commands::create(
                 &api,
                 &commands::CreateArgs {
@@ -712,6 +720,7 @@ fn run() -> Result<()> {
                     due_date,
                     labels,
                     category,
+                    template,
                 },
                 json,
             ),
@@ -938,6 +947,38 @@ mod tests {
             "Low",
         ]);
         assert!(matches!(created, TaskCmd::Create { priority: Some(p), .. } if p == "Low"));
+    }
+
+    #[test]
+    fn task_create_parses_template_and_rejects_it_with_content() {
+        let cli = Cli::try_parse_from([
+            "taskshoot",
+            "task",
+            "create",
+            "--project",
+            "DEV",
+            "--title",
+            "T",
+            "--template",
+            "Bug report",
+        ])
+        .unwrap();
+        let Cmd::Task(task) = cli.command else {
+            panic!("not a task command")
+        };
+        assert!(matches!(*task, TaskCmd::Create { template: Some(t), .. } if t == "Bug report"));
+        assert!(Cli::try_parse_from([
+            "taskshoot",
+            "task",
+            "create",
+            "--project",
+            "DEV",
+            "--content",
+            "hi",
+            "--template",
+            "x",
+        ])
+        .is_err());
     }
 
     #[test]

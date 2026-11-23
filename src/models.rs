@@ -158,6 +158,21 @@ pub struct TaskCategory {
     pub active: bool,
 }
 
+/// A task template of a project (`task-templates/`). `task create --template`
+/// copies its values into the new task; the task does not keep a reference.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskTemplate {
+    pub name: String,
+    #[serde(default)]
+    pub title_prefix: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub category_id: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
 /// One priority option of a project. Smaller values are higher priorities
 /// (the server default is 10 = High / 20 = Medium / 30 = Low). The server also
 /// sends an `id`, which is null for the defaults of a project that has no
