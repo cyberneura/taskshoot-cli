@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::api::{from_value, Api, TasksQuery};
 use crate::models::{
-    AssignableUser, Me, MentionCandidate, NotificationList, Org, OrgUser, PriorityOption, Project,
-    ReactionEmoji, SearchResult, Task, TaskCategory, TaskEvent, Workflow,
+    AssignableUser, DependencyRef, Me, MentionCandidate, NotificationList, Org, OrgUser,
+    PriorityOption, Project, ReactionEmoji, SearchResult, Task, TaskCategory, TaskEvent, Workflow,
 };
 use crate::output::{print_table, truncate_width};
 use crate::stages;
@@ -637,6 +637,8 @@ pub struct TasksFilter {
     pub untracked: bool,
     pub tracked: bool,
     pub bot_ready: Option<bool>,
+    /// Drop tasks with an open blocker (blocked by)
+    pub exclude_blocked: bool,
     pub limit: Option<u32>,
 }
 
@@ -1241,6 +1243,7 @@ fn project_tasks(
                 mentioned_user_id: user_filter.mentioned_user_id.map(str::to_string),
                 bot_ready: filter.bot_ready,
                 category_ids: category_ids.clone(),
+                exclude_blocked: filter.exclude_blocked,
                 labels: shared.labels.to_vec(),
             },
         )?;
@@ -1444,7 +1447,11 @@ fn task_row(task: &Task, multi: bool) -> Vec<String> {
         task.status_label.clone(),
         format!("{}%", task.progress),
         author_name(&task.assignee),
-        truncate_width(&task.title, 48),
+        if task.is_blocked {
+            truncate_width(&format!("[blocked] {}", task.title), 48)
+        } else {
+            truncate_width(&task.title, 48)
+        },
         updated,
     ]);
     row
@@ -1589,6 +1596,26 @@ pub fn show(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> Res
     );
     if task.time_logged_minutes > 0 {
         println!("logged:   {}", format_minutes(task.time_logged_minutes));
+    }
+    if !task.blocked_by.is_empty() {
+        println!(
+            "blocked:  {}",
+            if task.is_blocked {
+                "yes"
+            } else {
+                "no (every blocker is closed)"
+            }
+        );
+        for blocker in &task.blocked_by {
+            println!("  blocked by {}", dependency_line(blocker));
+        }
+    }
+    let blocking: Vec<DependencyRef> = match value.get("blocking") {
+        Some(v) if !v.is_null() => from_value(v.clone())?,
+        _ => Vec::new(),
+    };
+    for blocked in &blocking {
+        println!("  blocking   {}", dependency_line(blocked));
     }
     if !task.description.is_empty() {
         println!("\n{}", task.description);
@@ -2310,6 +2337,88 @@ pub fn cancel(
         return print_json(&value);
     }
     print_task_line(&value, "cancelled")
+}
+
+fn dependency_line(dep: &DependencyRef) -> String {
+    format!(
+        "{} [{}] {}",
+        dep.display_ref(),
+        if dep.closed { "closed" } else { "open" },
+        dep.title
+    )
+}
+
+/// `block` / `unblock`: the blocker is always sent as `KEY-N`, since the
+/// server resolves it across the organization and an untracked task (UUID)
+/// cannot be part of a relation.
+fn blocker_slug(blocker: &str) -> Result<String> {
+    match parse_task_ref(blocker)? {
+        TaskRef::Slug {
+            project_key,
+            number,
+        } => Ok(format!("{project_key}-{number}")),
+        TaskRef::Uuid(_) => {
+            bail!(
+                "--by must be a KEY-<number> reference: untracked tasks cannot block or be blocked"
+            )
+        }
+    }
+}
+
+pub fn block(
+    api: &Api,
+    task_arg: &str,
+    project: Option<&str>,
+    blocker: &str,
+    json: bool,
+) -> Result<()> {
+    let (project, task_ref) = resolve_target(task_arg, project)?;
+    let value = api.add_blocker(&project, &task_ref, &blocker_slug(blocker)?)?;
+    if json {
+        return print_json(&value);
+    }
+    print_blocked_state(&value, "blocked")
+}
+
+pub fn unblock(
+    api: &Api,
+    task_arg: &str,
+    project: Option<&str>,
+    blocker: &str,
+    json: bool,
+) -> Result<()> {
+    let (project, task_ref) = resolve_target(task_arg, project)?;
+    let value = api.remove_blocker(&project, &task_ref, &blocker_slug(blocker)?)?;
+    if json {
+        return print_json(&value);
+    }
+    print_blocked_state(&value, "unblocked")
+}
+
+fn print_blocked_state(value: &Value, verb: &str) -> Result<()> {
+    let task: Task = from_value(value.clone())?;
+    let blockers: Vec<String> = task
+        .blocked_by
+        .iter()
+        .map(|b| {
+            format!(
+                "{}{}",
+                b.display_ref(),
+                if b.closed { " (closed)" } else { "" }
+            )
+        })
+        .collect();
+    println!(
+        "{verb} {}: is_blocked: {} / blocked by: {}",
+        task.display_ref(),
+        task.is_blocked,
+        if blockers.is_empty() {
+            "-".to_string()
+        } else {
+            blockers.join(", ")
+        }
+    );
+    Ok(())
 }
 
 pub fn resume(api: &Api, task_arg: &str, project: Option<&str>, json: bool) -> Result<()> {

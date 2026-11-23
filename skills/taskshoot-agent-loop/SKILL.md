@@ -74,6 +74,7 @@ taskshoot tasks --project DEV \
   --assignee me \
   --status draft \
   --exclude-phase done,invalid,rejected,cancelled \
+  --exclude-blocked \
   --json
 ```
 
@@ -84,6 +85,10 @@ taskshoot tasks --project DEV \
   "the search broke", not "no candidates".
 - Use `--status <initial-stage>` for the project's not-yet-started stage(s); pass several
   OR'd values (comma-separated) if there is more than one.
+- **Pass `--exclude-blocked`.** A task can be `bot_ready` while a task it is blocked by
+  is still open: a human gave permission, but the prerequisite is unfinished. Such a
+  task shows `is_blocked: true` and is dropped server-side; it comes back once every
+  blocker is closed. `bot_ready` is never changed by this — do not clear it yourself.
 - **Always pass `--exclude-phase done,invalid,rejected,cancelled`.** These are *phases*,
   not statuses. In particular an "invalid" task keeps its original stage (e.g. "draft"),
   so it would otherwise slip into a `--status draft` candidate list and `--exclude-status`
